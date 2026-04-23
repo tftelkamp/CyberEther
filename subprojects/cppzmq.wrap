@@ -1,0 +1,13 @@
+[wrap-file]
+directory = cppzmq-4.11.0
+source_url = https://github.com/zeromq/cppzmq/archive/refs/tags/v4.11.0.tar.gz
+source_filename = cppzmq-4.11.0.tar.gz
+source_hash = 0fff4ff311a7c88fdb76fceefba0e180232d56984f577db371d505e4d4c91afd
+patch_filename = cppzmq_4.11.0-2_patch.zip
+patch_url = https://wrapdb.mesonbuild.com/v2/cppzmq_4.11.0-2/get_patch
+patch_hash = 016b9a499694e6f1aadb8859ac8362fce20526292b9e196c868edeaacc7fb958
+source_fallback_url = https://github.com/mesonbuild/wrapdb/releases/download/cppzmq_4.11.0-2/cppzmq-4.11.0.tar.gz
+wrapdb_version = 4.11.0-2
+
+[provide]
+dependency_names = cppzmq
