@@ -16,6 +16,7 @@ struct VrtZmq : public Block::Config {
     U64 vrt_channel = 0;
 
     JST_BLOCK_TYPE(vrtzmq);
+    JST_BLOCK_DOMAIN("IO");
     JST_BLOCK_PARAMS(numberOfBatches,
                      numberOfTimeSamples, bufferMultiplier,
                      hostName, vrt_instance, vrt_channel);

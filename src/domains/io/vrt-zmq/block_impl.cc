@@ -7,6 +7,7 @@
 namespace Jetstream::Blocks {
 
 struct VrtZmqImpl : public Block::Impl, public DynamicConfig<Blocks::VrtZmq> {
+    Result validate() override;
     Result configure() override;
     Result define() override;
     Result create() override;
@@ -30,6 +31,28 @@ Result VrtZmqImpl::configure() {
 
     return Result::SUCCESS;
 }
+
+Result VrtZmqImpl::validate() {
+    const auto& config = *candidate();
+
+    if (config.numberOfBatches == 0) {
+        JST_ERROR("[BLOCK_VRTZMQ] Number of batches cannot be zero.");
+        return Result::ERROR;
+    }
+
+    if (config.numberOfTimeSamples == 0) {
+        JST_ERROR("[BLOCK_VRTZMQ] Number of time samples cannot be zero.");
+        return Result::ERROR;
+    }
+
+    if (config.bufferMultiplier == 0) {
+        JST_ERROR("[BLOCK_VRTZMQ] Buffer multiplier cannot be zero.");
+        return Result::ERROR;
+    }
+
+    return Result::SUCCESS;
+}
+
 
 Result VrtZmqImpl::define() {
     JST_CHECK(defineInterfaceOutput("signal",
