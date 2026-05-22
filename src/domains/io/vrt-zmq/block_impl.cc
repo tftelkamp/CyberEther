@@ -7,6 +7,7 @@
 namespace Jetstream::Blocks {
 
 struct VrtZmqImpl : public Block::Impl, public DynamicConfig<Blocks::VrtZmq> {
+
     Result validate() override;
     Result configure() override;
     Result define() override;
@@ -52,7 +53,6 @@ Result VrtZmqImpl::validate() {
 
     return Result::SUCCESS;
 }
-
 
 Result VrtZmqImpl::define() {
     JST_CHECK(defineInterfaceOutput("signal",
