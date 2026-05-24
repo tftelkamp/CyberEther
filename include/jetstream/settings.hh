@@ -3,6 +3,7 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "jetstream/parser.hh"
 
@@ -24,7 +25,7 @@ struct JETSTREAM_API Settings {
         F32 scale = 1.0f;
         U64 framerate = 60;
 
-        JST_SERDES(device, headless, size, scale, framerate);
+        JST_SERDES(device, size, scale, framerate);
     };
 
     struct Remote {
@@ -59,13 +60,20 @@ struct JETSTREAM_API Settings {
         JST_SERDES(format);
     };
 
+    struct Registry {
+        std::vector<std::string> plugins;
+
+        JST_SERDES(plugins);
+    };
+
     Graphics graphics;
     Remote remote;
     Interface interface;
     Developer developer;
     Benchmark benchmark;
+    Registry registry;
 
-    JST_SERDES(graphics, remote, interface, developer, benchmark);
+    JST_SERDES(graphics, remote, interface, developer, registry);
 
     static Result Get(Settings& settings);
     static Result Set(const Settings& settings, bool persist = true);
