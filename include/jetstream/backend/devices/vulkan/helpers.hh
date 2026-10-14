@@ -6,11 +6,11 @@
 #include <vector>
 #include <thread>
 #include <functional>
-#include <cstdlib>
 #include <string>
 
 #include "jetstream/types.hh"
 #include "jetstream/macros.hh"
+#include "jetstream/platform.hh"
 
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_core.h>
@@ -132,28 +132,16 @@ inline QueueFamilyIndices FindQueueFamilies(const VkPhysicalDevice& device) {
     std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
     vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
 
-    int i = 0;
-    for (const auto& queueFamily : queueFamilies) {
-        if (queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+    constexpr VkQueueFlags required = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
+    for (uint32_t i = 0; i < queueFamilies.size(); ++i) {
+        const auto& queueFamily = queueFamilies[i];
+        if (queueFamily.queueCount > 0 &&
+            (queueFamily.queueFlags & required) == required) {
             indices.graphicFamily = i;
-        }
-
-        if (queueFamily.queueFlags & VK_QUEUE_COMPUTE_BIT) {
             indices.computeFamily = i;
-        }
-
-        indices.presentFamily = i;
-
-        if (indices.isComplete()) {
+            indices.presentFamily = i;
             break;
         }
-
-        i++;
-    }
-
-    if (!indices.computeFamily.has_value()) {
-        indices.computeFamily = indices.graphicFamily;
-        JST_WARN("[VULKAN] Compute queue not found. Using graphics queue instead. This may cause issues.");
     }
 
     return indices;
@@ -227,10 +215,118 @@ inline Result ExecuteOnce(VkDevice& device,
         JST_ERROR("[VULKAN] Can't submit one time queue.");
     });
 
-    vkWaitForFences(device, 1, &fence, true, UINT64_MAX);
+    JST_VK_CHECK(vkWaitForFences(device, 1, &fence, true, UINT64_MAX), [&]{
+        JST_ERROR("[VULKAN] Can't wait for one time queue.");
+    });
     vkResetFences(device, 1, &fence);
     vkResetCommandBuffer(commandBuffer, 0);
 
+    return Result::SUCCESS;
+}
+
+inline Result SubmitOnce(VkDevice device,
+                         VkPhysicalDevice physicalDevice,
+                         VkQueue queue,
+                         const std::function<Result(VkCommandBuffer&)>& func) {
+    struct Scope {
+        VkDevice device;
+        VkCommandPool pool = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+
+        ~Scope() {
+            if (fence != VK_NULL_HANDLE) vkDestroyFence(device, fence, nullptr);
+            if (pool != VK_NULL_HANDLE) vkDestroyCommandPool(device, pool, nullptr);
+        }
+    } scope{device};
+
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.queueFamilyIndex = FindQueueFamilies(physicalDevice).graphicFamily.value();
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT |
+                     VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    JST_VK_CHECK(vkCreateCommandPool(device, &poolInfo, nullptr, &scope.pool), [&]{
+        JST_ERROR("[VULKAN] Failed to create one time command pool.");
+    });
+
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo commandInfo{};
+    commandInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    commandInfo.commandPool = scope.pool;
+    commandInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    commandInfo.commandBufferCount = 1;
+    JST_VK_CHECK(vkAllocateCommandBuffers(device, &commandInfo, &commandBuffer), [&]{
+        JST_ERROR("[VULKAN] Failed to allocate one time command buffer.");
+    });
+
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    JST_VK_CHECK(vkCreateFence(device, &fenceInfo, nullptr, &scope.fence), [&]{
+        JST_ERROR("[VULKAN] Failed to create one time fence.");
+    });
+
+    return ExecuteOnce(device, queue, scope.fence, commandBuffer, func);
+}
+
+struct HostVisibleBuffer {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    U8* mapped = nullptr;
+};
+
+inline void DestroyHostVisibleBuffer(VkDevice device, HostVisibleBuffer& buffer) {
+    if (buffer.mapped) vkUnmapMemory(device, buffer.memory);
+    if (buffer.buffer != VK_NULL_HANDLE) vkDestroyBuffer(device, buffer.buffer, nullptr);
+    if (buffer.memory != VK_NULL_HANDLE) vkFreeMemory(device, buffer.memory, nullptr);
+    buffer = {};
+}
+
+inline Result CreateHostVisibleBuffer(VkDevice device,
+                                      VkPhysicalDevice physicalDevice,
+                                      const U64& size,
+                                      const VkBufferUsageFlags& usage,
+                                      HostVisibleBuffer& buffer) {
+    HostVisibleBuffer created;
+    const auto release = [&]{
+        DestroyHostVisibleBuffer(device, created);
+    };
+
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = size;
+    bufferInfo.usage = usage;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    JST_VK_CHECK(vkCreateBuffer(device, &bufferInfo, nullptr, &created.buffer), [&]{
+        release();
+        JST_ERROR("[VULKAN] Failed to create a {} byte host-visible buffer.", size);
+    });
+
+    VkMemoryRequirements requirements;
+    vkGetBufferMemoryRequirements(device, created.buffer, &requirements);
+
+    VkMemoryAllocateInfo allocation{};
+    allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = FindMemoryType(
+        physicalDevice, requirements.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    JST_VK_CHECK(vkAllocateMemory(device, &allocation, nullptr, &created.memory), [&]{
+        release();
+        JST_ERROR("[VULKAN] Failed to allocate host-visible buffer memory.");
+    });
+
+    JST_VK_CHECK(vkBindBufferMemory(device, created.buffer, created.memory, 0), [&]{
+        release();
+        JST_ERROR("[VULKAN] Failed to bind host-visible buffer memory.");
+    });
+
+    void* mapped = nullptr;
+    JST_VK_CHECK(vkMapMemory(device, created.memory, 0, VK_WHOLE_SIZE, 0, &mapped), [&]{
+        release();
+        JST_ERROR("[VULKAN] Failed to map host-visible buffer memory.");
+    });
+    created.mapped = static_cast<U8*>(mapped);
+
+    buffer = created;
     return Result::SUCCESS;
 }
 
@@ -300,36 +396,33 @@ inline Result TransitionImageLayout(VkCommandBuffer& commandBuffer,
 }
 
 inline bool WindowMightBeWayland() {
-    // Return false if we are not on Linux.
-
-#ifndef JST_OS_LINUX
-    return false;
-#endif
-
+#ifdef JST_OS_LINUX
     // Try to get the session type from the environment variables.
 
-    const char* xdgSessionType = std::getenv("XDG_SESSION_TYPE");
-    if (xdgSessionType != nullptr) {
-        std::string sessionTypeStr(xdgSessionType);
-        if (sessionTypeStr == "x11") {
-            return false;
-        } else if (sessionTypeStr == "wayland") {
+    std::string environmentValue;
+    if (Platform::EnvironmentVariable("XDG_SESSION_TYPE", environmentValue) == Result::SUCCESS) {
+        if (environmentValue == "wayland" &&
+            Platform::EnvironmentVariable("WAYLAND_DISPLAY", environmentValue) == Result::SUCCESS) {
             return true;
+        } else if (environmentValue == "x11" &&
+                   Platform::EnvironmentVariable("DISPLAY", environmentValue) == Result::SUCCESS) {
+            return false;
         }
     }
 
-    const char* displayEnv = std::getenv("DISPLAY");
-    if (displayEnv != nullptr) {
-        return false;
+    if (Platform::EnvironmentVariable("WAYLAND_DISPLAY", environmentValue) == Result::SUCCESS) {
+        return true;
     }
 
-    const char* waylandDisplayEnv = std::getenv("WAYLAND_DISPLAY");
-    if (waylandDisplayEnv != nullptr) {
-        return true;
+    if (Platform::EnvironmentVariable("DISPLAY", environmentValue) == Result::SUCCESS) {
+        return false;
     }
 
     // If we can't get the session type, default to true.
     return true;
+#else
+    return false;
+#endif
 }
 
 }  // namespace Jetstream::Backend

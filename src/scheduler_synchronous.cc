@@ -13,6 +13,7 @@
 #include <jetstream/module.hh>
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -34,9 +35,10 @@ struct SynchronousScheduler : public Scheduler::Impl {
     Result add(const std::shared_ptr<Module>& module) override;
     Result remove(const std::shared_ptr<Module>& module) override;
     Result reload(const std::shared_ptr<Module>& module) override;
+    Result synchronize(const std::function<Result()>& fn) override;
 
-    Result present() override;
-    Result compute() override;
+    Result present(std::unordered_set<std::string>& failedModules) override;
+    Result compute(std::unordered_set<std::string>& failedModules) override;
 
  private:
     void haltAll();
@@ -80,18 +82,22 @@ struct SynchronousScheduler : public Scheduler::Impl {
     std::vector<std::string> topoOrder;
     std::vector<std::string> sourceModules;
     std::vector<std::string> presentModules;
+    std::unordered_set<std::string> staticModules;
+    std::unordered_set<std::string> settledModules;
+    std::unordered_map<std::string, Module::Timing> settledTimings;
+
+    static constexpr std::chrono::milliseconds throttleInterval{100};
+    std::unordered_set<std::string> throttledModules;
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> throttleDeadlines;
 
     struct RuntimeSegment {
         std::shared_ptr<Runtime> runtime;
         std::vector<std::string> modules;
     };
     std::vector<RuntimeSegment> runtimes;
-    std::unordered_map<std::string, std::shared_ptr<Runtime::Metrics>> metrics_;
 
     Result rebuildOrder();
     Result rebuildRuntimes();
-
-    const std::unordered_map<std::string, std::shared_ptr<Runtime::Metrics>>& metrics() const override;
 };
 
 Result SynchronousScheduler::create() {
@@ -106,18 +112,30 @@ Result SynchronousScheduler::destroy() {
 
         // Destroy runtimes in reverse order.
 
+        Result result = Result::SUCCESS;
         for (auto& segment : std::ranges::reverse_view(runtimes)) {
             if (segment.runtime) {
-                segment.runtime->destroy();
+                const auto destroyResult = segment.runtime->destroy();
+                if (result == Result::SUCCESS && 
+                    destroyResult != Result::SUCCESS &&
+                    destroyResult != Result::RELOAD) {
+                    result = destroyResult;
+                }
             }
         }
 
         runtimes.clear();
         topoOrder.clear();
         sourceModules.clear();
+        presentModules.clear();
+        staticModules.clear();
+        settledModules.clear();
+        settledTimings.clear();
+        throttledModules.clear();
+        throttleDeadlines.clear();
         modules.clear();
 
-        return Result::SUCCESS;
+        return result;
     }));
 
     return Result::SUCCESS;
@@ -144,7 +162,9 @@ Result SynchronousScheduler::stop() {
 }
 
 Result SynchronousScheduler::add(const std::shared_ptr<Module>& module) {
-    JST_CHECK(module->context()->scheduler()->presentInitialize());
+    if ((module->taint() & Module::Taint::SURFACE) != Module::Taint::CLEAN) {
+        JST_CHECK(module->context()->scheduler()->presentInitialize());
+    }
 
     JST_CHECK(lockState([&]{
         if (modules.contains(module->name())) {
@@ -153,8 +173,27 @@ Result SynchronousScheduler::add(const std::shared_ptr<Module>& module) {
         }
 
         modules[module->name()] = module;
-        JST_CHECK(this->rebuildOrder());
-        JST_CHECK(this->rebuildRuntimes());
+
+        const auto rollback = [&]() -> Result {
+            modules.erase(module->name());
+            JST_CHECK(this->rebuildOrder());
+            return this->rebuildRuntimes();
+        };
+
+        auto result = this->rebuildOrder();
+        if (result == Result::SUCCESS) {
+            result = this->rebuildRuntimes();
+        }
+
+        if (result != Result::SUCCESS) {
+            const auto rollbackResult = rollback();
+            if (rollbackResult != Result::SUCCESS) {
+                JST_ERROR("[SCHEDULER_SYNCHRONOUS] Failed to rollback add for module '{}'.", module->name());
+                return rollbackResult;
+            }
+
+            return result;
+        }
 
         return Result::SUCCESS;
     }));
@@ -188,7 +227,17 @@ Result SynchronousScheduler::reload(const std::shared_ptr<Module>&) {
     return Result::SUCCESS;
 }
 
-Result SynchronousScheduler::present() {
+Result SynchronousScheduler::synchronize(const std::function<Result()>& fn) {
+    if (!fn) {
+        return Result::SUCCESS;
+    }
+
+    return lockState(fn);
+}
+
+Result SynchronousScheduler::present(std::unordered_set<std::string>& failedModules) {
+    failedModules.clear();
+
     if (isStopping() || isPresentHalted()) {
         clearPresentRequest();
         return Result::SUCCESS;
@@ -246,6 +295,7 @@ Result SynchronousScheduler::present() {
             const auto& mod = modules.at(name);
             res = mod->context()->scheduler()->presentSubmit();
             if (res != Result::SUCCESS && res != Result::RELOAD) {
+                failedModules.insert(name);
                 break;
             }
         }
@@ -262,7 +312,9 @@ Result SynchronousScheduler::present() {
     return Result::SUCCESS;
 }
 
-Result SynchronousScheduler::compute() {
+Result SynchronousScheduler::compute(std::unordered_set<std::string>& failedModules) {
+    failedModules.clear();
+
     if (isComputeHalted()) {
         waitComputeHalt();
         return Result::SUCCESS;
@@ -278,6 +330,8 @@ Result SynchronousScheduler::compute() {
     std::vector<std::shared_ptr<Module>> localSourceModules;
     U64 localGeneration;
     U64 localRuntimeCount;
+    bool throttled = false;
+    bool settled = false;
     {
         auto lock = sharedDataLock();
 
@@ -294,10 +348,42 @@ Result SynchronousScheduler::compute() {
         localGeneration = currentGeneration();
 
         for (const auto& name : sourceModules) {
-            if (modules.contains(name)) {
+            if (modules.contains(name) && !settledModules.contains(name)) {
                 localSourceModules.push_back(modules.at(name));
             }
         }
+
+        settled = !modules.empty() && settledModules.size() == modules.size();
+
+        // If every unsettled module is throttled and none is due, slow the loop
+        // instead of polling sources and submitting skipped work.
+
+        const bool allPendingModulesThrottled = std::ranges::all_of(modules, [&](const auto& entry) {
+            return settledModules.contains(entry.first) || throttledModules.contains(entry.first);
+        });
+
+        if (allPendingModulesThrottled) {
+            throttled = true;
+
+            const auto now = std::chrono::steady_clock::now();
+
+            for (const auto& name : throttledModules) {
+                if (settledModules.contains(name)) {
+                    continue;
+                }
+
+                const auto it = throttleDeadlines.find(name);
+                if (it == throttleDeadlines.end() || now >= it->second) {
+                    throttled = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (throttled || settled) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        return Result::SUCCESS;
     }
 
     // Phase 2: Poll source modules (no lock held, can block).
@@ -351,7 +437,10 @@ Result SynchronousScheduler::compute() {
                     break;
                 }
 
-                JST_CHECK(res);
+                if (res != Result::SUCCESS && res != Result::RELOAD) {
+                    failedModules.insert(mod->name());
+                    return res;
+                }
             }
 
             if (allReady) {
@@ -366,6 +455,8 @@ Result SynchronousScheduler::compute() {
     std::unordered_set<std::string> skippedModules;
 
     for (U64 i = 0; i < localRuntimeCount; i++) {
+        std::vector<std::string> pendingModules;
+
         // Priority Yield: Check if present wants in before each segment.
 
         if (isPresentRequested()) {
@@ -387,7 +478,7 @@ Result SynchronousScheduler::compute() {
         }
 
         {
-            auto dataLock = sharedDataLock();
+            std::unique_lock dataLock(dataMutex);
 
             if (currentGeneration() != localGeneration) {
                 return Result::SUCCESS;
@@ -395,6 +486,18 @@ Result SynchronousScheduler::compute() {
 
             if (isComputeHalted() || topoOrder.empty()) {
                 return Result::SUCCESS;
+            }
+
+            pendingModules.reserve(runtimes[i].modules.size());
+
+            for (const auto& name : runtimes[i].modules) {
+                if (!settledModules.contains(name)) {
+                    pendingModules.push_back(name);
+                }
+            }
+
+            if (pendingModules.empty()) {
+                continue;
             }
 
             auto lock = exclusiveSharedLock();
@@ -411,14 +514,48 @@ Result SynchronousScheduler::compute() {
 
             setComputeActive();
 
-            res = runtimes[i].runtime->compute(runtimes[i].modules, skippedModules);
+            const auto now = std::chrono::steady_clock::now();
+
+            for (const auto& name : pendingModules) {
+                if (!throttledModules.contains(name)) {
+                    continue;
+                }
+
+                auto& deadline = throttleDeadlines[name];
+                if (now < deadline) {
+                    skippedModules.insert(name);
+                } else {
+                    deadline = now + throttleInterval;
+                }
+            }
+
+            res = runtimes[i].runtime->compute(pendingModules, skippedModules, failedModules);
+
+            if (res == Result::SUCCESS) {
+                for (const auto& name : pendingModules) {
+                    if (staticModules.contains(name) && !skippedModules.contains(name)) {
+                        const bool inserted = settledModules.insert(name).second;
+                        if (inserted) {
+                            auto timing = modules.at(name)->timing();
+                            settledTimings[name] = timing;
+                            timing.computeTime = 0.0f;
+                            modules.at(name)->timing(timing);
+                        }
+                    }
+                }
+            }
 
             clearComputeActive();
         }
 
         notifyPresent();
 
-        if (res != Result::SUCCESS && res != Result::YIELD) {
+        if (res != Result::SUCCESS) {
+            if (res == Result::ERROR && failedModules.empty()) {
+                for (const auto& name : pendingModules) {
+                    failedModules.insert(name);
+                }
+            }
             break;
         }
     }
@@ -438,6 +575,7 @@ Result SynchronousScheduler::rebuildOrder() {
     topoOrder.clear();
     sourceModules.clear();
     presentModules.clear();
+    staticModules.clear();
 
     // Build adjacency list and calculate in-degrees for topological sort.
 
@@ -468,6 +606,20 @@ Result SynchronousScheduler::rebuildOrder() {
         }
     }
 
+    // Collect modules tainted with THROTTLED so compute slows them down.
+
+    throttledModules.clear();
+
+    for (const auto& [name, mod] : modules) {
+        if ((mod->taint() & Module::Taint::THROTTLED) != Module::Taint::CLEAN) {
+            throttledModules.insert(name);
+        }
+    }
+
+    std::erase_if(throttleDeadlines, [&](const auto& entry) {
+        return !throttledModules.contains(entry.first);
+    });
+
     // Kahn's algorithm for topological sort.
 
     std::queue<std::string> q;
@@ -478,7 +630,7 @@ Result SynchronousScheduler::rebuildOrder() {
             sourceModules.push_back(name);
         }
 
-        if (modules.at(name)->surface()) {
+        if ((modules.at(name)->taint() & Module::Taint::SURFACE) != Module::Taint::CLEAN) {
             presentModules.push_back(name);
         }
     }
@@ -501,6 +653,45 @@ Result SynchronousScheduler::rebuildOrder() {
         return Result::ERROR;
     }
 
+    // Input mutation can invalidate retained or aliased static buffers. Disable
+    // settling until the scheduler has enough alias information to prove safety.
+
+    const bool hasInPlaceModule = std::ranges::any_of(modules, [](const auto& entry) {
+        return (entry.second->taint() & Module::Taint::IN_PLACE) != Module::Taint::CLEAN;
+    });
+
+    if (hasInPlaceModule) {
+        return Result::SUCCESS;
+    }
+
+    // Derive static descendants from explicit roots. STATELESS modules only inherit
+    // staticness when every input has a known static producer in this graph.
+
+    for (const auto& name : topoOrder) {
+        const auto& mod = modules.at(name);
+
+        if ((mod->taint() & Module::Taint::STATIC_OUTPUT) != Module::Taint::CLEAN) {
+            staticModules.insert(name);
+            continue;
+        }
+
+        if ((mod->taint() & Module::Taint::STATELESS) == Module::Taint::CLEAN ||
+            mod->inputs().empty()) {
+            continue;
+        }
+
+        const bool hasOnlyStaticInputs = std::ranges::all_of(mod->inputs(), [&](const auto& entry) {
+            const auto& link = entry.second;
+            return link.producer.has_value() &&
+                   modules.contains(link.producer->module) &&
+                   staticModules.contains(link.producer->module);
+        });
+
+        if (hasOnlyStaticInputs) {
+            staticModules.insert(name);
+        }
+    }
+
     return Result::SUCCESS;
 }
 
@@ -511,7 +702,6 @@ Result SynchronousScheduler::rebuildRuntimes() {
         }
     }
     runtimes.clear();
-    metrics_.clear();
 
     if (topoOrder.empty()) {
         return Result::SUCCESS;
@@ -530,18 +720,6 @@ Result SynchronousScheduler::rebuildRuntimes() {
         const std::string runtimeName = jst::fmt::format("{}", runtimes.size());
         auto runtime = std::make_shared<Runtime>(runtimeName, currentDevice, currentRuntime);
         JST_CHECK(runtime->create(segmentModules));
-
-        // Assign metrics for each block.
-
-        std::unordered_set<std::string> blocks;
-
-        for (const auto& fullName : segmentNames) {
-            blocks.insert(Parser::SplitString(fullName, "-")[0]);
-        }
-
-        for (const auto& name : blocks) {
-            metrics_[name] = runtime->metrics();
-        }
 
         runtimes.push_back({std::move(runtime), std::move(segmentNames)});
         segmentModules.clear();
@@ -568,10 +746,6 @@ Result SynchronousScheduler::rebuildRuntimes() {
     JST_CHECK(flushSegment());
 
     return Result::SUCCESS;
-}
-
-const std::unordered_map<std::string, std::shared_ptr<Runtime::Metrics>>& SynchronousScheduler::metrics() const {
-    return metrics_;
 }
 
 void SynchronousScheduler::haltAll() {
@@ -680,6 +854,17 @@ Result SynchronousScheduler::lockState(const std::function<Result()>& func) {
     sharedMutex.lock();
     presentSync = true;
     computeSync = true;
+
+    for (const auto& [name, timing] : settledTimings) {
+        if (!modules.contains(name)) {
+            continue;
+        }
+
+        modules.at(name)->timing(timing);
+    }
+
+    settledTimings.clear();
+    settledModules.clear();
 
     Result res = func();
 

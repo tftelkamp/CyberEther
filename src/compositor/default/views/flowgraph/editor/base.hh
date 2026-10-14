@@ -16,13 +16,13 @@
 
 namespace Jetstream {
 
-struct FlowgraphEditor : public Sakura::Component {
+struct FlowgraphEditor {
     struct Config {
         std::string id;
         bool clipboardHasData = false;
-        bool debugRuntimeMetricsEnabled = false;
+        bool debugTimingEnabled = false;
         bool openBlockPicker = false;
-        std::vector<FlowgraphBlockPicker::BlockOption> blockOptions;
+        std::function<std::vector<FlowgraphBlockPicker::BlockOption>()> onBuildBlockOptions;
 
         std::string title;
         std::string summary;
@@ -35,6 +35,7 @@ struct FlowgraphEditor : public Sakura::Component {
         std::function<void(const std::string&, std::optional<Extent2D<F32>>, DeviceType, RuntimeType, ProviderType)> onCreateBlock;
         std::function<void(const std::string&)> onCopyBlock;
         std::function<void(std::optional<Extent2D<F32>>)> onPasteBlock;
+        std::function<void(const std::string&)> onRenameBlock;
         std::function<void(const std::string&)> onReloadBlock;
         std::function<void(const std::string&)> onDeleteBlock;
         std::function<void(const std::string&, DeviceType, RuntimeType, ProviderType)> onChangeBlockDevice;
@@ -43,7 +44,11 @@ struct FlowgraphEditor : public Sakura::Component {
         std::function<void(const std::string&, Parser::Map, bool)> onReconfigureBlock;
         std::function<void(Result, std::string)> onConfigError;
         std::function<void(bool, std::vector<std::string>, std::function<void(std::string)>)> onBrowseConfigPath;
-        std::function<void(const std::string&, F32, F32, F32, F32)> onNodeLayout;
+        std::function<void(const std::string&, F32, F32, F32, F32, std::optional<FlowgraphNode::Layout>)> onNodeLayout;
+        std::function<void(const std::string&, Rect, Extent2D<F32>, std::optional<Extent2D<F32>>)> onNodeBounds;
+        std::function<void(Rect)> onViewport;
+        std::function<void(const std::string&, bool)> onNodeConfigCollapse;
+        std::function<void(const std::string&, bool)> onNodeConfigDetach;
     };
 
     void update(Config config) {
@@ -89,8 +94,12 @@ struct FlowgraphEditor : public Sakura::Component {
             .onMouseGridPositionChange = [this](Extent2D<F32> gridPosition) {
                 mouseGridPosition = gridPosition;
             },
-            .onViewportGridCenterChange = [this](Extent2D<F32> gridPosition) {
-                viewportGridCenter = gridPosition;
+            .onViewportGridChange = [this](Rect viewport) {
+                viewportGridCenter = {viewport.x + viewport.width * 0.5f,
+                                      viewport.y + viewport.height * 0.5f};
+                if (this->config.onViewport) {
+                    this->config.onViewport(viewport);
+                }
             },
         });
 
@@ -101,35 +110,39 @@ struct FlowgraphEditor : public Sakura::Component {
             blockPicker = FlowgraphBlockPicker();
         }
 
-        blockPicker.update({
-            .id = this->config.id + ":block-picker",
-            .search = blockPickerSearch,
-            .selectedIndex = blockPickerSelectedIndex,
-            .blocks = this->config.blockOptions,
-            .onResolveGridPosition = [this]() {
-                return blockPickerGridPosition;
-            },
-            .onSearchChange = [this](const std::string& value) {
-                blockPickerSearch = value;
-            },
-            .onSelectIndex = [this](const int index) {
-                blockPickerSelectedIndex = index;
-            },
-            .onCreateBlock = [this](const std::string& moduleId,
-                                    Extent2D<F32> gridPosition,
-                                    DeviceType device,
-                                    RuntimeType runtime,
-                                    ProviderType provider) {
-                suppressEditorDoubleClick = true;
-                if (this->config.onCreateBlock) {
-                    this->config.onCreateBlock(moduleId, gridPosition, device, runtime, provider);
-                }
-            },
-            .onClose = [this]() {
-                suppressEditorDoubleClick = true;
-                blockPickerOpen = false;
-            },
-        });
+        if (blockPickerOpen) {
+            blockPicker.update({
+                .id = this->config.id + ":block-picker",
+                .search = blockPickerSearch,
+                .selectedIndex = blockPickerSelectedIndex,
+                .blocks = this->config.onBuildBlockOptions
+                    ? this->config.onBuildBlockOptions()
+                    : std::vector<FlowgraphBlockPicker::BlockOption>{},
+                .onResolveGridPosition = [this]() {
+                    return blockPickerGridPosition;
+                },
+                .onSearchChange = [this](const std::string& value) {
+                    blockPickerSearch = value;
+                },
+                .onSelectIndex = [this](const int index) {
+                    blockPickerSelectedIndex = index;
+                },
+                .onCreateBlock = [this](const std::string& moduleId,
+                                        Extent2D<F32> gridPosition,
+                                        DeviceType device,
+                                        RuntimeType runtime,
+                                        ProviderType provider) {
+                    suppressEditorDoubleClick = true;
+                    if (this->config.onCreateBlock) {
+                        this->config.onCreateBlock(moduleId, gridPosition, device, runtime, provider);
+                    }
+                },
+                .onClose = [this]() {
+                    suppressEditorDoubleClick = true;
+                    blockPickerOpen = false;
+                },
+            });
+        }
         blockPickerWasOpen = blockPickerOpen;
 
         for (const auto& block : this->config.graph) {
@@ -160,9 +173,10 @@ struct FlowgraphEditor : public Sakura::Component {
             }
             FlowgraphNode::Config nodeConfig{
                 .id = block.name,
+                .inspectorId = this->config.id + ":" + block.name + ":inspector",
                 .block = std::move(nodeBlock),
                 .pasteEnabled = this->config.clipboardHasData,
-                .runtimeMetricsEnabled = this->config.debugRuntimeMetricsEnabled,
+                .timingEnabled = this->config.debugTimingEnabled,
                 .onCopy = [this, blockName = block.name]() {
                     if (this->config.onCopyBlock) {
                         this->config.onCopyBlock(blockName);
@@ -173,9 +187,19 @@ struct FlowgraphEditor : public Sakura::Component {
                         this->config.onPasteBlock(pastePos);
                     }
                 },
+                .onRename = [this, blockName = block.name]() {
+                    if (this->config.onRenameBlock) {
+                        this->config.onRenameBlock(blockName);
+                    }
+                },
                 .onReload = [this, blockName = block.name]() {
                     if (this->config.onReloadBlock) {
                         this->config.onReloadBlock(blockName);
+                    }
+                },
+                .onInspectApply = [this, blockName = block.name](Parser::Map values) {
+                    if (this->config.onReconfigureBlock) {
+                        this->config.onReconfigureBlock(blockName, std::move(values), false);
                     }
                 },
                 .onDelete = [this, blockName = block.name]() {
@@ -192,9 +216,29 @@ struct FlowgraphEditor : public Sakura::Component {
 
                     this->config.onChangeBlockDevice(blockName, device, runtime, provider);
                 },
-                .onLayout = [this, blockName = block.name](F32 x, F32 y, F32 width, F32 height) {
+                .onLayout = [this, blockName = block.name, base = block.layout](F32 x,
+                                                                                F32 y,
+                                                                                F32 width,
+                                                                                F32 height) {
                     if (this->config.onNodeLayout) {
-                        this->config.onNodeLayout(blockName, x, y, width, height);
+                        this->config.onNodeLayout(blockName, x, y, width, height, base);
+                    }
+                },
+                .onBounds = [this, blockName = block.name](Rect bounds,
+                                                           Extent2D<F32> size,
+                                                           std::optional<Extent2D<F32>> content) {
+                    if (this->config.onNodeBounds) {
+                        this->config.onNodeBounds(blockName, bounds, size, content);
+                    }
+                },
+                .onConfigCollapse = [this, blockName = block.name](bool collapsed) {
+                    if (this->config.onNodeConfigCollapse) {
+                        this->config.onNodeConfigCollapse(blockName, collapsed);
+                    }
+                },
+                .onConfigDetach = [this, blockName = block.name](bool detached) {
+                    if (this->config.onNodeConfigDetach) {
+                        this->config.onNodeConfigDetach(blockName, detached);
                     }
                 },
             };
@@ -202,6 +246,14 @@ struct FlowgraphEditor : public Sakura::Component {
             auto& nodeView = nodeViews[nodeConfig.id];
             nodeView.update(std::move(nodeConfig));
             nodeViewIds.push_back(block.name);
+        }
+
+        for (auto it = nodeViews.begin(); it != nodeViews.end();) {
+            if (!nodeIdToBlockName.contains(FlowgraphNodeId(it->first))) {
+                it = nodeViews.erase(it);
+            } else {
+                ++it;
+            }
         }
 
         for (const auto& block : this->config.graph) {

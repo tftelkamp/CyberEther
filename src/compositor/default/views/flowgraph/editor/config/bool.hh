@@ -3,19 +3,15 @@
 
 #include "types.hh"
 
-// TODO: Cleanup parsing.
-
 namespace Jetstream {
 
-struct FlowgraphConfigBoolField : public Sakura::Component {
+struct FlowgraphConfigBoolField {
     using Config = FlowgraphConfigFieldConfig;
 
-    void update(Config config) {
+    Result update(Config config) {
         this->config = std::move(config);
-        if (this->config.encoded != parsedEncoded) {
-            value = this->config.encoded == "true" || this->config.encoded == "1";
-            parsedEncoded = this->config.encoded;
-        }
+        value = false;
+        JST_CHECK(Parser::Deserialize(this->config.values, this->config.name, value));
         frame.update({
             .id = this->config.id,
             .label = this->config.label,
@@ -25,13 +21,14 @@ struct FlowgraphConfigBoolField : public Sakura::Component {
             .id = this->config.id + "Input",
             .value = value,
             .onChange = [this](bool nextValue) {
-                auto values = this->config.values;
-                values[this->config.name] = nextValue;
+                Parser::Map patch;
+                patch[this->config.name] = nextValue;
                 if (this->config.onApply) {
-                    this->config.onApply(std::move(values), false);
+                    this->config.onApply(std::move(patch), false);
                 }
             },
         });
+        return Result::SUCCESS;
     }
 
     void render(const Sakura::Context& ctx) const {
@@ -42,7 +39,6 @@ struct FlowgraphConfigBoolField : public Sakura::Component {
 
  private:
     Config config;
-    std::string parsedEncoded;
     bool value = false;
     Sakura::NodeField frame;
     Sakura::NodeBoolInput input;

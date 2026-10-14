@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include "jetstream/domains/core/ones_tensor/block.hh"
 #include "jetstream/domains/core/multiply/block.hh"
 #include "jetstream/domains/dsp/window/block.hh"
 #include "flowgraph_fixture.hh"
@@ -19,8 +20,8 @@ TEST_CASE_METHOD(FlowgraphFixture, "Multiply block creates and exposes output",
 
     Blocks::Multiply config;
     REQUIRE(flowgraph->blockCreate("mul_block", config, inputs) == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("mul_block")->state() == Block::State::Created);
-    REQUIRE(flowgraph->blockList().at("mul_block")->outputs().count("product") == 1);
+    REQUIRE(viewBlock("mul_block").state == Block::State::Created);
+    REQUIRE(viewBlock("mul_block").outputs.count("product") == 1);
 }
 
 TEST_CASE_METHOD(FlowgraphFixture, "Multiply block handles disconnect and reconnect",
@@ -36,9 +37,47 @@ TEST_CASE_METHOD(FlowgraphFixture, "Multiply block handles disconnect and reconn
             Result::SUCCESS);
 
     REQUIRE(flowgraph->blockDisconnect("mul_life", "a") == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("mul_life")->state() == Block::State::Incomplete);
+    REQUIRE(viewBlock("mul_life").state == Block::State::Incomplete);
 
     REQUIRE(flowgraph->blockConnect("mul_life", "a", "mul_life_a", "window") ==
             Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("mul_life")->state() == Block::State::Created);
+    REQUIRE(viewBlock("mul_life").state == Block::State::Created);
+}
+
+TEST_CASE_METHOD(FlowgraphFixture, "Multiply block delegates shape validation to its module",
+                 "[modules][multiply][block][validation]") {
+    Blocks::OnesTensor sourceA;
+    sourceA.shape = {2, 3};
+    REQUIRE(flowgraph->blockCreate("mul_shape_a", sourceA, {}) == Result::SUCCESS);
+
+    Blocks::OnesTensor sourceB;
+    sourceB.shape = {2, 2};
+    REQUIRE(flowgraph->blockCreate("mul_shape_b", sourceB, {}) == Result::SUCCESS);
+
+    TensorMap inputs;
+    inputs["a"].requested("mul_shape_a", "buffer");
+    inputs["b"].requested("mul_shape_b", "buffer");
+
+    REQUIRE(flowgraph->blockCreate("mul_shape_bad", Blocks::Multiply{}, inputs) ==
+            Result::SUCCESS);
+    REQUIRE(viewBlock("mul_shape_bad").state == Block::State::Errored);
+    REQUIRE(viewBlock("mul_shape_bad").outputs.empty());
+}
+
+TEST_CASE_METHOD(FlowgraphFixture, "Multiply block delegates dtype validation to its module",
+                 "[modules][multiply][block][validation]") {
+    Blocks::OnesTensor source;
+    source.shape = {4};
+    source.dataType = "F64";
+    REQUIRE(flowgraph->blockCreate("mul_dtype_a", source, {}) == Result::SUCCESS);
+    REQUIRE(flowgraph->blockCreate("mul_dtype_b", source, {}) == Result::SUCCESS);
+
+    TensorMap inputs;
+    inputs["a"].requested("mul_dtype_a", "buffer");
+    inputs["b"].requested("mul_dtype_b", "buffer");
+
+    REQUIRE(flowgraph->blockCreate("mul_dtype_bad", Blocks::Multiply{}, inputs) ==
+            Result::SUCCESS);
+    REQUIRE(viewBlock("mul_dtype_bad").state == Block::State::Errored);
+    REQUIRE(viewBlock("mul_dtype_bad").outputs.empty());
 }

@@ -9,13 +9,13 @@
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "jetstream/render/base/window_attachment.hh"
+#include "jetstream/render/base/transfer.hh"
 #include "jetstream/types.hh"
 #include "jetstream/logger.hh"
-#include "jetstream/parser.hh"
-#include "jetstream/viewport/base.hh"
 #include "jetstream/render/base/surface.hh"
 #include "jetstream/render/components/generic.hh"
 #include "jetstream/render/types.hh"
@@ -23,13 +23,13 @@
 #include "jetstream/render/tools/imgui.h"
 #include "jetstream/render/tools/imgui_stdlib.h"
 #include "jetstream/render/tools/imgui_fmtlib.h"
-#include "jetstream/render/tools/imgui_internal.h"
 
 namespace Jetstream::Render::Components { class Font; }
+namespace Jetstream::Viewport { class Generic; }
 
 namespace Jetstream::Render {
 
-class Window {
+class JETSTREAM_API Window {
  public:
     struct Config {
         F32 scale = 1.0f;
@@ -57,8 +57,20 @@ class Window {
 
     Result begin();
     Result end();
+    Result cancel();
 
     Result synchronize();
+
+    void frameClearColor(const ColorRGBA<F32>& color, ImDrawList* background = nullptr) {
+        frameBackground = color;
+        frameBackgroundDrawList = background;
+    }
+    const ColorRGBA<F32>& frameClearColor() const { return frameBackground; }
+
+    Result capture(const std::shared_ptr<const Texture>& texture,
+                   Extent2D<U64>& size, std::vector<U8>& pixels);
+
+    virtual bool supportsCapture() const { return false; }
 
     virtual const Stats& stats() const = 0;
     virtual std::string info() const = 0;
@@ -131,8 +143,14 @@ class Window {
 
     virtual Result underlyingBegin() = 0;
     virtual Result underlyingEnd() = 0;
+    virtual Result underlyingCancel() { return Result::SUCCESS; }
 
     virtual Result underlyingSynchronize() = 0;
+
+    Result collectTransfers(Transfer::Batch& batch) const;
+    void abortImguiFrame();
+    void prepareImgui();
+    bool textureVisibleForPresentation(const Texture& texture) const;
 
     // Font.
 
@@ -146,13 +164,23 @@ class Window {
     void updateScalingFactor(const Viewport::Generic& viewport);
 
  private:
+    ColorRGBA<F32> frameBackground = {0.0f, 0.0f, 0.0f, 1.0f};
+    ImDrawList* frameBackgroundDrawList = nullptr;
+    std::unordered_set<ImTextureID> frameSampledTextures;
+    bool frameCustomDraws = true;
+    bool shouldDeferAttachmentQueueProcessing();
+    bool attachmentQueueEmpty() const;
+    Result destroyInternal();
+
     std::vector<std::shared_ptr<Components::Generic>> components;
 
     std::vector<std::function<void(const F32& scalingFactor)>> styleSetupCallbacks;
     std::vector<std::function<void(const F32& scalingFactor)>> styleScaleCallbacks;
 
     uint32_t frameCount;
+    bool created = false;
     bool graphicalLoopThreadStarted;
+    bool frameActive = false;
     std::thread::id graphicalLoopThreadId;
     std::mutex newFrameQueueMutex;
 
@@ -163,13 +191,29 @@ class Window {
         std::shared_ptr<WindowAttachment> attachment;
     };
 
-    Result processAttachmentQueues();
+    struct ResourceLease {
+        size_t surfaceReferences = 0;
+        bool root = false;
+        uint32_t rootReleaseExpiration = 0;
+        const Surface* framebufferOwner = nullptr;
+    };
 
+    Result processAttachmentQueues();
+    std::vector<std::shared_ptr<WindowAttachment>> surfaceResourceList(const std::shared_ptr<Surface>& surface) const;
+    Result acquireSurfaceResources(const std::shared_ptr<Surface>& surface);
+    Result releaseSurfaceResources(const std::shared_ptr<Surface>& surface);
+    Result releaseSurfaceResource(const std::shared_ptr<WindowAttachment>& resource);
+    Result finalizeAttachmentDestruction(const std::shared_ptr<WindowAttachment>& attachment);
+
+    mutable std::mutex attachmentStateMutex;
+    bool destructionInProgress = false;
     std::queue<std::shared_ptr<WindowAttachment>> bindQueue;
     std::queue<std::shared_ptr<WindowAttachment>> unbindQueue;
     std::queue<PendingDestruction> destroyQueue;
 
     std::vector<std::shared_ptr<WindowAttachment>> attachments;
+    std::unordered_set<const WindowAttachment*> destroyingAttachments;
+    std::unordered_map<const WindowAttachment*, ResourceLease> resourceLeases;
 };
 
 }  // namespace Jetstream::Render

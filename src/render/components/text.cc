@@ -1,12 +1,19 @@
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
+#include <limits>
+#include <new>
 #include <span>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
 #include <glm/mat4x4.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "jetstream/render/base.hh"
 #include "jetstream/render/components/text.hh"
+#include "jetstream/tools/numeric.hh"
 
 #include "resources/shaders/global_shaders.hh"
 
@@ -22,19 +29,50 @@ Text::~Text() {
 }
 
 struct Text::Impl {
+    static std::vector<F32> GlyphAdvances(const Font* font, const std::string& fill, F32 scale) {
+        std::vector<F32> result(fill.size(), 0.0f);
+        if (!font) {
+            return result;
+        }
+        for (U64 i = 0; i < fill.size();) {
+            U32 codepoint = 0;
+            const U64 length = Unicode::Decode(fill, i, codepoint);
+            if (codepoint >= 32) {
+                result[i] = std::round(font->glyph(static_cast<I32>(codepoint)).xAdvance * scale);
+            }
+            i += length;
+        }
+        return result;
+    }
+
+    static F32 ScaledLineHeight(const Font* font, F32 scale) {
+        if (!font) {
+            return 0.0f;
+        }
+        return std::max(1.0f, std::round(static_cast<F32>(font->lineHeight()) * scale));
+    }
+
     struct UniformBuffer {
         glm::vec3 color;
         F32 sharpness;
+        F32 atlasPixelRange;
+        F32 padding[3];
+    };
+
+    struct InstanceData {
+        glm::mat4 transform;
+        glm::vec4 color;
     };
 
     struct Element {
+        U64 index = 0;
         U64 characterCount = 0;
         const ElementConfig& config;
 
         Extent2D<I32> bounds;
         std::span<glm::vec2> posVertices;
         std::span<glm::vec2> fillVertices;
-        std::span<glm::mat4> instances;
+        std::span<InstanceData> instances;
     };
 
     // Variables.
@@ -47,15 +85,46 @@ struct Text::Impl {
     // Render.
 
     bool updateFontUniformBufferFlag = false;
-    bool updateFontPosVerticesBufferFlag = false;
-    bool updateFontFillVerticesBufferFlag = false;
-    bool updateFontInstanceBufferFlag = false;
     bool updateFontIndicesBufferFlag = false;
     bool updateVertexCountFlag = false;
 
+    struct DirtyElements {
+        std::vector<U64> indices;
+        std::vector<U8> marked;
+        bool all = false;
+
+        void mark(U64 index) {
+            if (all || marked[index]) {
+                return;
+            }
+            marked[index] = 1;
+            indices.push_back(index);
+        }
+
+        void markAll() {
+            all = true;
+        }
+
+        bool empty() const {
+            return !all && indices.empty();
+        }
+
+        void clear() {
+            for (const U64 index : indices) {
+                marked[index] = 0;
+            }
+            indices.clear();
+            all = false;
+        }
+    };
+
+    DirtyElements dirtyVertices;
+    DirtyElements dirtyInstances;
+    bool vertexCountDirty = false;
+
     std::vector<glm::vec2> posVertices;
     std::vector<glm::vec2> fillVertices;
-    std::vector<glm::mat4> instances;
+    std::vector<InstanceData> instances;
     std::vector<U32> indices;
 
     std::shared_ptr<Render::Buffer> fontUniformBuffer;
@@ -81,6 +150,10 @@ struct Text::Impl {
     Result updateElementVertex(Element& element);
     Result updateElementInstance(Element& element);
 
+    static Result FlushDirty(DirtyElements& dirty,
+                             U64 unitsPerElement,
+                             std::initializer_list<Render::Buffer*> buffers);
+
     // Constructor.
 
     Impl(const Config& config) : config(config) {}
@@ -102,15 +175,39 @@ Result Text::create(Window* window) {
     }
 
     // Calculate constants.
-    const U64 numberOfVertices = config.maxCharacters * 4;
+    U64 numberOfVertices = 0;
     const U64 numberOfInstances = config.elements.size();
-    const U64 numberOfIndices = config.maxCharacters * 6;
+    U64 numberOfIndices = 0;
+    U64 totalVertexCount = 0;
+    if (!detail::CheckedMultiply(config.maxCharacters, 4,
+                                 numberOfVertices) ||
+        !detail::CheckedMultiply(config.maxCharacters, 6,
+                                 numberOfIndices) ||
+        !detail::CheckedMultiply(numberOfVertices, numberOfInstances,
+                                 totalVertexCount) ||
+        numberOfVertices > std::numeric_limits<U32>::max() ||
+        numberOfInstances > std::numeric_limits<U32>::max() ||
+        totalVertexCount > pimpl->posVertices.max_size() ||
+        totalVertexCount > pimpl->fillVertices.max_size() ||
+        numberOfInstances > pimpl->instances.max_size() ||
+        numberOfIndices > pimpl->indices.max_size()) {
+        JST_ERROR("[TEXT] Geometry exceeds the supported rendering range.");
+        return Result::ERROR;
+    }
 
     // Reserve memory.
-    pimpl->posVertices.resize(numberOfVertices * numberOfInstances);
-    pimpl->fillVertices.resize(numberOfVertices * numberOfInstances);
-    pimpl->instances.resize(numberOfInstances);
-    pimpl->indices.resize(numberOfIndices);
+    try {
+        pimpl->posVertices.resize(totalVertexCount);
+        pimpl->fillVertices.resize(totalVertexCount);
+        pimpl->instances.resize(numberOfInstances);
+        pimpl->indices.resize(numberOfIndices);
+    } catch (const std::bad_alloc&) {
+        JST_ERROR("[TEXT] Failed to allocate text geometry.");
+        return Result::ERROR;
+    } catch (const std::length_error&) {
+        JST_ERROR("[TEXT] Text geometry exceeds container capacity.");
+        return Result::ERROR;
+    }
 
     // Debug information.
     JST_DEBUG("[TEXT] Number of vertices: {}", numberOfVertices);
@@ -126,7 +223,6 @@ Result Text::create(Window* window) {
         cfg.size = 1;
         cfg.target = Render::Buffer::Target::UNIFORM;
         JST_CHECK(window->build(pimpl->fontUniformBuffer, cfg));
-        JST_CHECK(window->bind(pimpl->fontUniformBuffer));
     }
 
     {
@@ -136,7 +232,6 @@ Result Text::create(Window* window) {
         cfg.size = pimpl->posVertices.size();
         cfg.target = Render::Buffer::Target::VERTEX;
         JST_CHECK(window->build(pimpl->fontPosVerticesBuffer, cfg));
-        JST_CHECK(window->bind(pimpl->fontPosVerticesBuffer));
     }
 
     {
@@ -146,17 +241,15 @@ Result Text::create(Window* window) {
         cfg.size = pimpl->fillVertices.size();
         cfg.target = Render::Buffer::Target::VERTEX;
         JST_CHECK(window->build(pimpl->fontFillVerticesBuffer, cfg));
-        JST_CHECK(window->bind(pimpl->fontFillVerticesBuffer));
     }
 
     {
         Render::Buffer::Config cfg;
         cfg.buffer = pimpl->instances.data();
-        cfg.elementByteSize = sizeof(glm::mat4);
+        cfg.elementByteSize = sizeof(Impl::InstanceData);
         cfg.size = pimpl->instances.size();
         cfg.target = Render::Buffer::Target::VERTEX;
         JST_CHECK(window->build(pimpl->fontInstanceBuffer, cfg));
-        JST_CHECK(window->bind(pimpl->fontInstanceBuffer));
     }
 
     {
@@ -166,7 +259,6 @@ Result Text::create(Window* window) {
         cfg.size = pimpl->indices.size();
         cfg.target = Render::Buffer::Target::VERTEX_INDICES;
         JST_CHECK(window->build(pimpl->fontIndicesBuffer, cfg));
-        JST_CHECK(window->bind(pimpl->fontIndicesBuffer));
     }
 
     {
@@ -176,7 +268,7 @@ Result Text::create(Window* window) {
             {pimpl->fontFillVerticesBuffer, 2},
         };
         cfg.instances = {
-            {pimpl->fontInstanceBuffer, 16},
+            {pimpl->fontInstanceBuffer, sizeof(Impl::InstanceData) / sizeof(F32)},
         };
         cfg.indices = pimpl->fontIndicesBuffer;
         JST_CHECK(window->build(pimpl->fontVertex, cfg));
@@ -210,16 +302,25 @@ Result Text::create(Window* window) {
 
     // Create element data.
 
-    U32 i = 0;
+    std::vector<std::string> ids;
+    ids.reserve(config.elements.size());
     for (const auto& [id, _] : config.elements) {
-        pimpl->elements.emplace(id, Text::Impl::Element{
-            .config = config.elements[id],
+        ids.push_back(id);
+    }
+    std::sort(ids.begin(), ids.end());
+
+    for (U64 i = 0; i < ids.size(); ++i) {
+        pimpl->elements.emplace(ids[i], Text::Impl::Element{
+            .index = i,
+            .config = config.elements[ids[i]],
             .bounds = {0, 0},
             .posVertices = std::span{pimpl->posVertices}.subspan(numberOfVertices * i, numberOfVertices),
             .fillVertices = std::span{pimpl->fillVertices}.subspan(numberOfVertices * i, numberOfVertices),
-            .instances = std::span{pimpl->instances}.subspan(i++, 1),
+            .instances = std::span{pimpl->instances}.subspan(i, 1),
         });
     }
+    pimpl->dirtyVertices.marked.assign(ids.size(), 0);
+    pimpl->dirtyInstances.marked.assign(ids.size(), 0);
 
     // Load static state.
     JST_CHECK(pimpl->updateUniforms());
@@ -230,14 +331,8 @@ Result Text::create(Window* window) {
     return Result::SUCCESS;
 }
 
-Result Text::destroy(Window* window) {
+Result Text::destroy(Window*) {
     JST_DEBUG("[TEXT] Unloading text.");
-
-    JST_CHECK(window->unbind(pimpl->fontUniformBuffer));
-    JST_CHECK(window->unbind(pimpl->fontPosVerticesBuffer));
-    JST_CHECK(window->unbind(pimpl->fontFillVerticesBuffer));
-    JST_CHECK(window->unbind(pimpl->fontInstanceBuffer));
-    JST_CHECK(window->unbind(pimpl->fontIndicesBuffer));
 
     return Result::SUCCESS;
 }
@@ -273,12 +368,14 @@ Result Text::update(const std::string& elementId, const ElementConfig& elementCo
     auto& updatedElement = elementConfig;
 
     // Check if element data has changed.
-    const bool shouldUpdateVertices = updatedElement.fill != currentElement.fill;
+    const bool shouldUpdateVertices = updatedElement.fill != currentElement.fill ||
+                                      updatedElement.scale != currentElement.scale;
     const bool shouldUpdateInstance = shouldUpdateVertices ||
                                       updatedElement.scale != currentElement.scale ||
                                       updatedElement.position != currentElement.position ||
                                       updatedElement.alignment != currentElement.alignment ||
-                                      updatedElement.rotationDeg != currentElement.rotationDeg;
+                                      updatedElement.rotationDeg != currentElement.rotationDeg ||
+                                      updatedElement.color != currentElement.color;
 
     if (!shouldUpdateInstance) {
         return Result::SUCCESS;
@@ -293,22 +390,42 @@ Result Text::update(const std::string& elementId, const ElementConfig& elementCo
     // Update element vertex.
     if (shouldUpdateVertices) {
         JST_CHECK(pimpl->updateElementVertex(element));
-        JST_CHECK(pimpl->refreshVertexCount());
-
-        // Set flag to update buffers.
-        pimpl->updateFontPosVerticesBufferFlag = true;
-        pimpl->updateFontFillVerticesBufferFlag = true;
+        pimpl->dirtyVertices.mark(element.index);
+        pimpl->vertexCountDirty = true;
     }
 
     // Update element instance.
     if (shouldUpdateInstance) {
         JST_CHECK(pimpl->updateElementInstance(element));
-
-        // Set flag to update buffer.
-        pimpl->updateFontInstanceBufferFlag = true;
+        pimpl->dirtyInstances.mark(element.index);
     }
 
     return Result::SUCCESS;
+}
+
+F32 Text::advance(const std::string& fill, F32 scale) const {
+    const auto perGlyph = advances(fill, scale);
+
+    F32 x = 0.0f;
+    F32 maxWidth = 0.0f;
+    for (U64 i = 0; i < fill.size(); ++i) {
+        if (fill[i] == '\n') {
+            maxWidth = std::max(maxWidth, x);
+            x = 0.0f;
+            continue;
+        }
+        x += perGlyph[i];
+    }
+
+    return std::max(maxWidth, x);
+}
+
+std::vector<F32> Text::advances(const std::string& fill, F32 scale) const {
+    return Impl::GlyphAdvances(config.font.get(), fill, scale);
+}
+
+F32 Text::lineHeight(F32 scale) const {
+    return Impl::ScaledLineHeight(config.font.get(), scale);
 }
 
 Result Text::updatePixelSize(const Extent2D<F32>& pixelSize) {
@@ -334,10 +451,20 @@ Result Text::updatePixelSize(const Extent2D<F32>& pixelSize) {
     return Result::SUCCESS;
 }
 
+Result Text::updateScissorRect(const std::optional<Render::ScissorRect>& rect) {
+    pimpl->fontProgram->scissorRect(rect);
+    return Result::SUCCESS;
+}
+
+void Text::enabled(bool value) {
+    pimpl->fontProgram->setEnabled(value);
+}
+
 Result Text::Impl::updateUniforms() {
     // Set data.
     uniforms.color = glm::vec3(config.color.r, config.color.g, config.color.b);
     uniforms.sharpness = config.sharpness;
+    uniforms.atlasPixelRange = config.font->atlasPixelRange();
 
     // Set flag to update buffer.
     updateFontUniformBufferFlag = true;
@@ -351,11 +478,8 @@ Result Text::Impl::updateVertices() {
         JST_CHECK(updateElementVertex(element));
     }
 
-    // Set flag to update buffers.
-    updateFontPosVerticesBufferFlag = true;
-    updateFontFillVerticesBufferFlag = true;
-
-    JST_CHECK(refreshVertexCount());
+    dirtyVertices.markAll();
+    vertexCountDirty = true;
 
     return Result::SUCCESS;
 }
@@ -366,8 +490,7 @@ Result Text::Impl::updateInstances() {
         JST_CHECK(updateElementInstance(element));
     }
 
-    // Set flag to update buffer.
-    updateFontInstanceBufferFlag = true;
+    dirtyInstances.markAll();
 
     return Result::SUCCESS;
 }
@@ -390,12 +513,20 @@ Result Text::Impl::updateIndices() {
 }
 
 Result Text::Impl::refreshVertexCount() {
-    U64 totalCharacterCount = 0;
+    U64 maxCharacterCount = 0;
+    U64 drawCount = 0;
     for (const auto& [_, element] : elements) {
-        totalCharacterCount += element.characterCount;
+        maxCharacterCount = std::max(maxCharacterCount, element.characterCount);
+        if (element.characterCount > 0) {
+            drawCount = std::max(drawCount, element.index + 1);
+        }
     }
 
-    const U64 nextVertexCount = totalCharacterCount * 6;
+    if (drawFont) {
+        drawFont->setDrawCount(drawCount);
+    }
+
+    const U64 nextVertexCount = maxCharacterCount * 6;
     if (nextVertexCount == vertexCount) {
         return Result::SUCCESS;
     }
@@ -405,65 +536,91 @@ Result Text::Impl::refreshVertexCount() {
     return Result::SUCCESS;
 }
 
+Result Text::Impl::FlushDirty(DirtyElements& dirty,
+                              U64 unitsPerElement,
+                              std::initializer_list<Render::Buffer*> buffers) {
+    if (dirty.all) {
+        for (auto* buffer : buffers) {
+            JST_CHECK(buffer->update());
+        }
+        dirty.clear();
+        return Result::SUCCESS;
+    }
+
+    auto& indices = dirty.indices;
+    std::sort(indices.begin(), indices.end());
+    U64 runStart = 0;
+    while (runStart < indices.size()) {
+        U64 runEnd = runStart + 1;
+        while (runEnd < indices.size() && indices[runEnd] == indices[runEnd - 1] + 1) {
+            ++runEnd;
+        }
+        const U64 first = indices[runStart] * unitsPerElement;
+        const U64 count = (runEnd - runStart) * unitsPerElement;
+        for (auto* buffer : buffers) {
+            JST_CHECK(buffer->update(first, count));
+        }
+        runStart = runEnd;
+    }
+    dirty.clear();
+    return Result::SUCCESS;
+}
+
 Result Text::Impl::updateElementInstance(Element& element) {
-    // Reference transform.
-    auto& transform = element.instances[0];
+    auto& instance = element.instances[0];
+    auto& transform = instance.transform;
 
-    // Reset transform.
+    glm::vec2 alignment(0.0f, 0.0f);
+    if (element.config.alignment.x == 1) {
+        alignment.x = -static_cast<F32>(element.bounds.x) / 2.0f;
+    } else if (element.config.alignment.x == 2) {
+        alignment.x = -static_cast<F32>(element.bounds.x);
+    }
+    if (element.config.alignment.y == 1) {
+        alignment.y = static_cast<F32>(element.bounds.y) / 2.0f;
+    } else if (element.config.alignment.y == 2) {
+        alignment.y = static_cast<F32>(element.bounds.y);
+    }
+
+    glm::vec2 origin(element.config.position.x, element.config.position.y);
+    const bool snap = element.config.rotationDeg == 0.0f &&
+                      config.pixelSize.x > 0.0f &&
+                      config.pixelSize.y > 0.0f;
+    if (snap) {
+        const F32 column = std::round((origin.x + 1.0f) / config.pixelSize.x + alignment.x);
+        const F32 row = std::round((1.0f - origin.y) / config.pixelSize.y - alignment.y);
+        origin = glm::vec2(-1.0f + column * config.pixelSize.x, 1.0f - row * config.pixelSize.y);
+        alignment = glm::vec2(0.0f, 0.0f);
+    }
+
     transform = glm::mat4(1.0f);
-
-    // Translate to screen position.
-    transform = glm::translate(transform, glm::vec3(element.config.position.x, element.config.position.y, 0.0f));
-
-    // Scale to pixel size.
+    transform = glm::translate(transform, glm::vec3(origin, 0.0f));
     transform = glm::scale(transform, glm::vec3(config.pixelSize.x, config.pixelSize.y, 1.0f));
-
-    // Scale font.
-    transform = glm::scale(transform, glm::vec3(element.config.scale, element.config.scale, 1.0f));
-
-    // Rotate.
     transform = glm::rotate(transform, glm::radians(element.config.rotationDeg), glm::vec3(0.0f, 0.0f, 1.0f));
+    transform = glm::translate(transform, glm::vec3(alignment, 0.0f));
 
-    // Horizontal center.
-    if (element.config.alignment.x) {
-        if (element.config.alignment.x == 1) {
-            transform = glm::translate(transform, glm::vec3(-element.bounds.x / 2.0f, 0.0f, 0.0f));
-        }
-        if (element.config.alignment.x == 2) {
-            transform = glm::translate(transform, glm::vec3(-element.bounds.x, 0.0f, 0.0f));
-        }
-    }
-
-    // Vertical center.
-    if (element.config.alignment.y) {
-        if (element.config.alignment.y == 1) {
-            transform = glm::translate(transform, glm::vec3(0.0f, element.bounds.y / 2.0f, 0.0f));
-        }
-        if (element.config.alignment.y == 2) {
-            transform = glm::translate(transform, glm::vec3(0.0f, element.bounds.y, 0.0f));
-        }
-    }
+    const auto color = element.config.color.value_or(config.color);
+    instance.color = glm::vec4(color.r, color.g, color.b, color.a);
 
     return Result::SUCCESS;
 }
 
 Result Text::Impl::updateElementVertex(Element& element) {
-    // Clear buffers.
     std::fill(element.posVertices.begin(), element.posVertices.end(), glm::vec2(0.0f));
     std::fill(element.fillVertices.begin(), element.fillVertices.end(), glm::vec2(0.0f));
 
-    // Reset character count.
     element.characterCount = 0;
     element.bounds = {0, 0};
 
-    // Check config.
     if (element.config.fill.empty()) {
         return Result::SUCCESS;
     }
 
     U64 renderableCharacterCount = 0;
-    for (const auto c : element.config.fill) {
-        if (c >= 32 && c < 127 && c != ' ') {
+    for (U64 i = 0; i < element.config.fill.size();) {
+        U32 codepoint = 0;
+        i += Unicode::Decode(element.config.fill, i, codepoint);
+        if (codepoint >= 32 && codepoint != ' ') {
             ++renderableCharacterCount;
         }
     }
@@ -474,95 +631,94 @@ Result Text::Impl::updateElementVertex(Element& element) {
         return Result::ERROR;
     }
 
-    // Recalculate vertex buffer.
+    const auto& font = *config.font;
+    const auto& atlasSize = font.atlasSize();
+    const F32 scale = element.config.scale;
+    const F32 texel = scale / font.atlasScale();
+    const F32 lineHeight = ScaledLineHeight(config.font.get(), scale);
+    const F32 ascent = std::round(static_cast<F32>(font.ascent()) * scale);
+    const auto perGlyph = GlyphAdvances(config.font.get(), element.config.fill, scale);
 
-    F32 x = 0.0f;
+    std::vector<F32> lineWidths(1, 0.0f);
+    for (U64 i = 0; i < element.config.fill.size(); ++i) {
+        if (element.config.fill[i] == '\n') {
+            lineWidths.push_back(0.0f);
+        } else {
+            lineWidths.back() += perGlyph[i];
+        }
+    }
+    const F32 blockWidth = *std::max_element(lineWidths.begin(), lineWidths.end());
+    const U64 lineCount = lineWidths.size();
+
+    U64 lineIndex = 0;
+    F32 x = std::round((blockWidth - lineWidths[lineIndex]) * 0.5f);
     F32 y = 0.0f;
 
-    I32 minx = 0;
-    I32 miny = 0;
-
-    for (const auto& c : element.config.fill) {
-        if (c >= 32 && c < 127) {
-            if (c == ' ') {
-                continue;
-            }
-
-            // TODO: Check if there is no better way to do this.
-            const auto& b = config.font->glyph(c - 32);
-            minx = std::min(minx, static_cast<I32>(x + b.xOffset));
-            miny = std::max(miny, static_cast<I32>(y - b.yOffset));
-        }
-    }
-
-    const auto& fontSize = config.font->getConfig().size;
-
     for (U64 i = 0; i < element.config.fill.size(); ++i) {
-        const auto& atlasSize = config.font->atlasSize();
-        const auto& c = element.config.fill[i];
+        U32 codepoint = 0;
+        const U64 length = Unicode::Decode(element.config.fill, i, codepoint);
+        const F32 advance = perGlyph[i];
+        i += length - 1;
 
-        if (c >= 32 && c < 127) {
-            if (c == ' ') {
-                x += (fontSize / 2.0f);
-                continue;
-            }
-
-            const auto& b = config.font->glyph(c - 32);
-
-            F32 x0 = x + b.xOffset - minx;
-            F32 y0 = y - b.yOffset - miny;
-            F32 x1 = x0 + (b.x1 - b.x0);
-            F32 y1 = y0 - (b.y1 - b.y0);
-            const U64 base = element.characterCount * 4;
-
-            // Add positions.
-
-            element.posVertices[base + 0] = glm::vec2(x0, y0);
-            element.posVertices[base + 1] = glm::vec2(x1, y0);
-            element.posVertices[base + 2] = glm::vec2(x1, y1);
-            element.posVertices[base + 3] = glm::vec2(x0, y1);
-
-            // Normalize texture coordinates.
-
-            F32 s0 = b.x0 / static_cast<F32>(atlasSize.x);
-            F32 t0 = b.y0 / static_cast<F32>(atlasSize.y);
-            F32 s1 = b.x1 / static_cast<F32>(atlasSize.x);
-            F32 t1 = b.y1 / static_cast<F32>(atlasSize.y);
-
-            // Add texture coordinates.
-
-            element.fillVertices[base + 0] = glm::vec2(s0, t0);
-            element.fillVertices[base + 1] = glm::vec2(s1, t0);
-            element.fillVertices[base + 2] = glm::vec2(s1, t1);
-            element.fillVertices[base + 3] = glm::vec2(s0, t1);
-
-            // Update horizontal position.
-
-            x += b.xAdvance;
-
-            // Save text height.
-
-            element.bounds.y = std::max(element.bounds.y, static_cast<I32>(b.y1 - b.y0));
-
-            // Count actual rendered characters (non-space)
-            element.characterCount++;
+        if (codepoint == '\n') {
+            ++lineIndex;
+            x = std::round((blockWidth - lineWidths[lineIndex]) * 0.5f);
+            y -= lineHeight;
+            continue;
         }
+
+        if (codepoint < 32) {
+            continue;
+        }
+
+        if (codepoint == ' ') {
+            x += advance;
+            continue;
+        }
+
+        const auto& b = font.glyph(static_cast<I32>(codepoint));
+
+        const F32 x0 = x + static_cast<F32>(b.xOffset) * scale;
+        const F32 y0 = y - ascent - static_cast<F32>(b.yOffset) * scale;
+        const F32 x1 = x0 + static_cast<F32>(b.x1 - b.x0) * texel;
+        const F32 y1 = y0 - static_cast<F32>(b.y1 - b.y0) * texel;
+        const U64 base = element.characterCount * 4;
+
+        element.posVertices[base + 0] = glm::vec2(x0, y0);
+        element.posVertices[base + 1] = glm::vec2(x1, y0);
+        element.posVertices[base + 2] = glm::vec2(x1, y1);
+        element.posVertices[base + 3] = glm::vec2(x0, y1);
+
+        const F32 s0 = static_cast<F32>(b.x0) / static_cast<F32>(atlasSize.x);
+        const F32 t0 = static_cast<F32>(b.y0) / static_cast<F32>(atlasSize.y);
+        const F32 s1 = static_cast<F32>(b.x1) / static_cast<F32>(atlasSize.x);
+        const F32 t1 = static_cast<F32>(b.y1) / static_cast<F32>(atlasSize.y);
+
+        element.fillVertices[base + 0] = glm::vec2(s0, t0);
+        element.fillVertices[base + 1] = glm::vec2(s1, t0);
+        element.fillVertices[base + 2] = glm::vec2(s1, t1);
+        element.fillVertices[base + 3] = glm::vec2(s0, t1);
+
+        x += advance;
+        element.characterCount++;
     }
 
-    element.bounds.x = x;
+    element.bounds.x = static_cast<I32>(blockWidth);
+    element.bounds.y = static_cast<I32>(lineHeight * static_cast<F32>(lineCount));
 
     return Result::SUCCESS;
 }
 
 Result Text::present() {
-    if (pimpl->updateFontFillVerticesBufferFlag) {
-        pimpl->fontFillVerticesBuffer->update();
-        pimpl->updateFontFillVerticesBufferFlag = false;
+    if (pimpl->vertexCountDirty) {
+        JST_CHECK(pimpl->refreshVertexCount());
+        pimpl->vertexCountDirty = false;
     }
 
-    if (pimpl->updateFontPosVerticesBufferFlag) {
-        pimpl->fontPosVerticesBuffer->update();
-        pimpl->updateFontPosVerticesBufferFlag = false;
+    if (!pimpl->dirtyVertices.empty()) {
+        JST_CHECK(Impl::FlushDirty(pimpl->dirtyVertices,
+                                   config.maxCharacters * 4,
+                                   {pimpl->fontPosVerticesBuffer.get(), pimpl->fontFillVerticesBuffer.get()}));
     }
 
     if (pimpl->updateFontIndicesBufferFlag) {
@@ -575,20 +731,132 @@ Result Text::present() {
         pimpl->updateFontUniformBufferFlag = false;
     }
 
-    if (pimpl->updateFontInstanceBufferFlag) {
-        pimpl->fontInstanceBuffer->update();
-        pimpl->updateFontInstanceBufferFlag = false;
+    if (!pimpl->dirtyInstances.empty()) {
+        JST_CHECK(Impl::FlushDirty(pimpl->dirtyInstances, 1, {pimpl->fontInstanceBuffer.get()}));
     }
 
     if (pimpl->updateVertexCountFlag) {
-        const U64 maxIndices = config.maxCharacters * 6;
-        const U64 actualIndices = pimpl->vertexCount;
-        JST_TRACE("[TEXT] Vertex optimization: {}/{}.", actualIndices, maxIndices);
+        JST_TRACE("[TEXT] Vertex optimization: {}/{}.", pimpl->vertexCount,
+                  config.maxCharacters * 6);
         JST_CHECK(pimpl->drawFont->updateVertexCount(pimpl->vertexCount));
         pimpl->updateVertexCountFlag = false;
     }
 
     return Result::SUCCESS;
+}
+
+U64 Text::Unicode::Decode(std::string_view text, U64 pos, U32& codepoint) {
+    const U8 lead = static_cast<U8>(text[pos]);
+    U64 length = 1;
+    if (lead < 0x80) {
+        codepoint = lead;
+        return 1;
+    } else if ((lead & 0xE0) == 0xC0) {
+        codepoint = lead & 0x1F;
+        length = 2;
+    } else if ((lead & 0xF0) == 0xE0) {
+        codepoint = lead & 0x0F;
+        length = 3;
+    } else if ((lead & 0xF8) == 0xF0) {
+        codepoint = lead & 0x07;
+        length = 4;
+    } else {
+        codepoint = 0xFFFD;
+        return 1;
+    }
+    if (pos + length > text.size()) {
+        codepoint = 0xFFFD;
+        return 1;
+    }
+    for (U64 i = 1; i < length; ++i) {
+        const U8 byte = static_cast<U8>(text[pos + i]);
+        if ((byte & 0xC0) != 0x80) {
+            codepoint = 0xFFFD;
+            return 1;
+        }
+        codepoint = (codepoint << 6) | (byte & 0x3F);
+    }
+    static constexpr U32 kMinimum[] = {0, 0, 0x80, 0x800, 0x10000};
+    const bool overlong = codepoint < kMinimum[length];
+    const bool surrogate = codepoint >= 0xD800 && codepoint <= 0xDFFF;
+    if (overlong || surrogate || codepoint > 0x10FFFF) {
+        codepoint = 0xFFFD;
+        return 1;
+    }
+    return length;
+}
+
+bool Text::Unicode::IsAscii(std::string_view text) {
+    for (const char c : text) {
+        if (static_cast<U8>(c) >= 0x80) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string Text::Unicode::Encode(U32 codepoint) {
+    std::string out;
+    if (codepoint < 0x80) {
+        out.push_back(static_cast<char>(codepoint));
+    } else if (codepoint < 0x800) {
+        out.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+        out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    } else if (codepoint < 0x10000) {
+        out.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    } else {
+        out.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+    }
+    return out;
+}
+
+U64 Text::Unicode::PreviousCharacter(std::string_view text, U64 column) {
+    if (column == 0 || text.empty()) {
+        return 0;
+    }
+    column = std::min<U64>(column, text.size());
+    for (U64 c = column > 4 ? column - 4 : 0; c < column; ++c) {
+        U32 codepoint = 0;
+        if (c + Decode(text, c, codepoint) == column) {
+            return c;
+        }
+    }
+    return column - 1;
+}
+
+U64 Text::Unicode::NextCharacter(std::string_view text, U64 column) {
+    if (column >= text.size()) {
+        return text.size();
+    }
+    U32 codepoint = 0;
+    return column + Decode(text, column, codepoint);
+}
+
+U64 Text::Unicode::Align(std::string_view text, U64 column) {
+    if (column >= text.size()) {
+        return column;
+    }
+    for (U64 c = column > 3 ? column - 3 : 0; c < column; ++c) {
+        U32 codepoint = 0;
+        const U64 end = c + Decode(text, c, codepoint);
+        if (end > column) {
+            return end;
+        }
+    }
+    return column;
+}
+
+U64 Text::Unicode::Advance(std::string_view text, U64 pos, U64 count) {
+    U64 end = pos;
+    for (U64 i = 0; i < count && end < text.size(); ++i) {
+        end = NextCharacter(text, end);
+    }
+    return end;
 }
 
 }  // namespace Jetstream::Render::Components

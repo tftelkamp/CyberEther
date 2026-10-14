@@ -33,12 +33,12 @@ Result AmImpl::define() {
     JST_CHECK(defineInterfaceConfig("sampleRate",
                                     "Sample Rate",
                                     "Input signal sample rate.",
-                                    "float:MHz:3"));
+                                    {{"type", "float"}, {"unit", "MHz"}, {"scale", 1.0e6f}, {"precision", 3}}));
 
     JST_CHECK(defineInterfaceConfig("dcAlpha",
                                     "DC Alpha",
                                     "DC-blocking filter coefficient.",
-                                    "range:0.9:0.999:ratio:float"));
+                                    {{"type", "range"}, {"min", 0.9f}, {"max", 0.999f}, {"unit", "ratio"}}));
 
     return Result::SUCCESS;
 }
@@ -52,6 +52,6 @@ Result AmImpl::create() {
     return Result::SUCCESS;
 }
 
-JST_REGISTER_BLOCK(AmImpl);
+JST_REGISTER_BLOCK(AmImpl, {"am"});
 
 }  // namespace Jetstream::Blocks

@@ -1,0 +1,58 @@
+name: Emscripten Build
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    container:
+      image: emscripten/emsdk:6.0.8@sha256:f174124ff798a3ead1abef247d9a849c270b642d552fea500a42565ff210f765
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install system dependencies
+        run: |
+          set -euo pipefail
+          apt-get update --fix-missing
+          apt-get install -y --no-install-recommends \
+            git build-essential pkg-config python3-pip \
+            spirv-cross glslang-tools cargo
+          apt-get clean
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Install Python dependencies
+        run: |
+          set -euo pipefail
+          python3 -m pip install --break-system-packages meson ninja numpy mapbox_earcut
+
+      - name: Build WASM
+        run: |
+          set -euo pipefail
+          rm -rf build-wasm
+          meson setup --cross-file meson/crosscompile/emscripten.ini -Dbuildtype=release build-wasm
+          meson compile -C build-wasm cyberether
+          mkdir -p .dist/artifacts
+          tar -C build-wasm -czf .dist/artifacts/cyberether-emscripten-wasm32.tar.gz \
+            cyberether.js cyberether.wasm cyberether.js.symbols cyberether.wasm.map
+
+      - name: Validate WASM outputs
+        run: |
+          set -euo pipefail
+          test -f build-wasm/cyberether.js
+          test -f build-wasm/cyberether.wasm
+          test -f build-wasm/cyberether.js.symbols
+          test -f build-wasm/cyberether.wasm.map
+
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: cyberether-bin-emscripten-wasm32
+          path: .dist/artifacts/cyberether-emscripten-wasm32.tar.gz

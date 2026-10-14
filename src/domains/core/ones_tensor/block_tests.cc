@@ -1,6 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <limits>
+
 #include "flowgraph_fixture.hh"
 #include "jetstream/domains/core/ones_tensor/block.hh"
 
@@ -10,10 +12,10 @@ TEST_CASE_METHOD(FlowgraphFixture, "Ones Tensor block creates with default confi
                  "[modules][ones_tensor][block]") {
     Blocks::OnesTensor config;
     REQUIRE(flowgraph->blockCreate("ones_default", config, {}) == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("ones_default")->state() == Block::State::Created);
-    REQUIRE(flowgraph->blockList().at("ones_default")->outputs().count("buffer") == 1);
+    REQUIRE(viewBlock("ones_default").state == Block::State::Created);
+    REQUIRE(viewBlock("ones_default").outputs.count("buffer") == 1);
 
-    const Tensor& out = flowgraph->blockList().at("ones_default")->outputs().at("buffer").tensor;
+    const Tensor out = viewBlock("ones_default").outputs.at("buffer").tensor;
     REQUIRE(out.shape() == Shape{1});
     REQUIRE(out.dtype() == DataType::F32);
     REQUIRE_THAT(out.at<F32>(0), Catch::Matchers::WithinAbs(1.0f, 1e-6f));
@@ -31,27 +33,28 @@ TEST_CASE_METHOD(FlowgraphFixture, "Ones Tensor block creates a non-default CF32
     config.dataType = "CF32";
 
     REQUIRE(flowgraph->blockCreate("ones_cf32", config, {}) == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("ones_cf32")->state() == Block::State::Created);
+    REQUIRE(viewBlock("ones_cf32").state == Block::State::Created);
 
-    const Tensor& out = flowgraph->blockList().at("ones_cf32")->outputs().at("buffer").tensor;
+    const Tensor out = viewBlock("ones_cf32").outputs.at("buffer").tensor;
     REQUIRE(out.shape() == Shape{2, 3});
     REQUIRE(out.dtype() == DataType::CF32);
     REQUIRE_THAT(out.at<CF32>(1, 2).real(), Catch::Matchers::WithinAbs(1.0f, 1e-6f));
     REQUIRE_THAT(out.at<CF32>(1, 2).imag(), Catch::Matchers::WithinAbs(0.0f, 1e-6f));
 }
 
-TEST_CASE_METHOD(FlowgraphFixture, "Ones Tensor block recreates on config change",
-                 "[modules][ones_tensor][block][reconfigure]") {
-    REQUIRE(flowgraph->blockCreate("ones_recfg", "ones_tensor", {}, {}) == Result::SUCCESS);
+TEST_CASE_METHOD(FlowgraphFixture, "Ones Tensor sparse shape update preserves dtype",
+                  "[modules][ones_tensor][block][reconfigure]") {
+    Blocks::OnesTensor config;
+    config.dataType = "CF32";
+    REQUIRE(flowgraph->blockCreate("ones_recfg", config, {}) == Result::SUCCESS);
 
     Parser::Map update;
     update["shape"] = std::vector<U64>{2, 2};
-    update["dataType"] = std::string("CF32");
 
     REQUIRE(flowgraph->blockReconfigure("ones_recfg", update) == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("ones_recfg")->state() == Block::State::Created);
+    REQUIRE(viewBlock("ones_recfg").state == Block::State::Created);
 
-    const Tensor& out = flowgraph->blockList().at("ones_recfg")->outputs().at("buffer").tensor;
+    const Tensor out = viewBlock("ones_recfg").outputs.at("buffer").tensor;
     REQUIRE(out.shape() == Shape{2, 2});
     REQUIRE(out.dtype() == DataType::CF32);
     REQUIRE_THAT(out.at<CF32>(0, 1).real(), Catch::Matchers::WithinAbs(1.0f, 1e-6f));
@@ -64,5 +67,41 @@ TEST_CASE_METHOD(FlowgraphFixture, "Ones Tensor block rejects invalid config",
     config.shape = {0};
 
     REQUIRE(flowgraph->blockCreate("ones_bad", config, {}) == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("ones_bad")->state() == Block::State::Errored);
+    REQUIRE(viewBlock("ones_bad").state == Block::State::Errored);
+    REQUIRE(viewBlock("ones_bad").outputs.empty());
+}
+
+TEST_CASE_METHOD(FlowgraphFixture, "Ones Tensor block propagates layout validation",
+                 "[modules][ones_tensor][block][validation]") {
+    Blocks::OnesTensor config;
+    config.shape = {std::numeric_limits<U64>::max(), 2};
+
+    REQUIRE(flowgraph->blockCreate("ones_overflow", config, {}) == Result::SUCCESS);
+    REQUIRE(viewBlock("ones_overflow").state == Block::State::Errored);
+    REQUIRE(viewBlock("ones_overflow").outputs.empty());
+}
+
+TEST_CASE_METHOD(FlowgraphFixture, "Ones Tensor block preserves invalid shape for recovery",
+                 "[modules][ones_tensor][block][reconfigure][validation]") {
+    Blocks::OnesTensor config;
+    config.shape = {2};
+    REQUIRE(flowgraph->blockCreate("ones_update", config, {}) == Result::SUCCESS);
+    Parser::Map update;
+    update["shape"] = Shape{std::numeric_limits<U64>::max(), 2};
+    REQUIRE(flowgraph->blockReconfigure("ones_update", update) == Result::SUCCESS);
+    REQUIRE(viewBlock("ones_update").state == Block::State::Errored);
+    REQUIRE(viewBlock("ones_update").outputs.empty());
+
+    Parser::Map saved;
+    REQUIRE(flowgraph->blockConfig("ones_update", saved) == Result::SUCCESS);
+    REQUIRE(std::any_cast<Shape>(saved.at("shape")) ==
+            Shape{std::numeric_limits<U64>::max(), 2});
+
+    Parser::Map recovery;
+    recovery["shape"] = config.shape;
+    REQUIRE(flowgraph->blockReconfigure("ones_update", recovery) == Result::SUCCESS);
+    REQUIRE(viewBlock("ones_update").state == Block::State::Created);
+
+    const Tensor output = viewBlock("ones_update").outputs.at("buffer").tensor;
+    REQUIRE(output.shape() == Shape{2});
 }

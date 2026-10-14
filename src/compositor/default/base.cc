@@ -1,5 +1,10 @@
 #include "base.hh"
 
+#include "render/sakura/runtime.hh"
+
+#include "jetstream/render/sakura/clipboard.hh"
+#include "jetstream/render/sakura/toast.hh"
+
 #include "actions/base.hh"
 #include "presenters/base.hh"
 #include "themes.hh"
@@ -7,13 +12,13 @@
 #include "resources/fonts/compressed_jbmm.hh"
 #include "resources/fonts/compressed_jbmb.hh"
 #include "resources/fonts/compressed_fa.hh"
+#include "resources/fonts/compressed_sg.hh"
 
 #include "jetstream/platform.hh"
 #include "jetstream/logger.hh"
 #include "jetstream/instance_remote.hh"
 #include "jetstream/settings.hh"
 
-#include <any>
 #include <chrono>
 #include <deque>
 #include <functional>
@@ -33,6 +38,13 @@ DefaultCompositor::DefaultCompositor() :
         .enqueueCommand = [this](std::function<Result()> fn, bool silent) {
             Compositor::Impl::enqueue(std::move(fn), silent);
         },
+        .enqueueCommandWithMail = [this](std::function<Result()> fn, bool silent, Mail mail) {
+            Compositor::Impl::enqueue(std::move(fn), silent, [this, mail = std::move(mail)](const Result result) {
+                if (result == Result::SUCCESS) {
+                    enqueue(Mail(mail));
+                }
+            });
+        },
         .notify = [](Sakura::ToastType type, I32 durationMs, const std::string& message) {
             Sakura::PushToast(type, durationMs, message);
         },
@@ -41,6 +53,24 @@ DefaultCompositor::DefaultCompositor() :
         },
         .setClipboardText = [](const std::string& value) {
             Sakura::SetClipboardText(value);
+        },
+        .requestFile = [this](FilePickerRequest request) {
+            return actions.requestFile(std::move(request));
+        },
+        .checkForUpdates = [this]() {
+            updater.check();
+        },
+        .downloadUpdate = [this]() {
+            updater.download();
+        },
+        .applyUpdate = [this]() {
+            return updater.apply();
+        },
+        .dismissUpdate = [this]() {
+            updater.dismiss();
+        },
+        .submitFeedback = [this](const std::string& text) {
+            feedback.submit(text);
         },
     },
     actions(state, callbacks),
@@ -62,9 +92,7 @@ Result DefaultCompositor::create() {
 
     // Restore Sakura theme state.
 
-    state.sakura.themeKey = themes.contains(settings.interface.themeKey)
-        ? settings.interface.themeKey
-        : "Dark";
+    state.sakura.themeKey = ResolveThemeKey(settings.interface.themeKey);
     state.sakura.colorMap = themes.at(state.sakura.themeKey);
 
     // Restore graphics preferences.
@@ -82,7 +110,7 @@ Result DefaultCompositor::create() {
 
     state.debug.logLevel = settings.developer.logLevel;
     state.debug.latencyEnabled = settings.developer.latencyEnabled;
-    state.debug.runtimeMetricsEnabled = settings.developer.runtimeMetricsEnabled;
+    state.debug.timingEnabled = settings.developer.timingEnabled;
     JST_LOG_SET_DEBUG_LEVEL(state.debug.logLevel);
 
     // Restore remote streaming preferences.
@@ -90,6 +118,21 @@ Result DefaultCompositor::create() {
     state.remote.brokerUrl = settings.remote.brokerUrl;
     state.remote.autoJoinSessions = settings.remote.autoJoinSessions;
     state.remote.framerate = static_cast<U32>(settings.remote.framerate);
+
+    // Restore runtime preferences.
+
+    state.runtime.pythonPath = settings.runtime.python.path;
+    state.runtime.dependencyPolicy = settings.runtime.dependencyPolicy;
+    if (state.runtime.dependencyPolicy != "prompt" &&
+        state.runtime.dependencyPolicy != "allow" &&
+        state.runtime.dependencyPolicy != "deny") {
+        JST_WARN("[COMPOSITOR_IMPL_DEFAULT] Invalid saved runtime dependency policy '{}'. Using default.",
+                 state.runtime.dependencyPolicy);
+        state.runtime.dependencyPolicy = "prompt";
+    }
+    state.runtime.pythonCandidates = PythonRuntimeContext::DiscoverRuntimes();
+    state.runtime.pythonValidation = PythonRuntimeContext::ValidateRuntimePath(state.runtime.pythonPath);
+    state.runtime.initialPythonValidation = state.runtime.pythonValidation;
 
     try {
         state.remote.codec = StringToRemoteCodec(settings.remote.codec);
@@ -128,11 +171,18 @@ Result DefaultCompositor::create() {
             .data = fas_compressed_data,
             .size = fas_compressed_size,
         },
+        .display = {
+            .data = sg_compressed_data,
+            .size = sg_compressed_size,
+        },
     });
 
     // Prime the initial workbench view state.
 
     workbench.update(presenters.build());
+
+    updater.start();
+    updater.check();
 
     return Result::SUCCESS;
 }
@@ -140,10 +190,25 @@ Result DefaultCompositor::create() {
 Result DefaultCompositor::destroy() {
     JST_INFO("[COMPOSITOR_IMPL_DEFAULT] Destroying compositor.");
 
+    actions.cancelFilePicker();
+    updater.shutdown();
+    feedback.shutdown();
+    if (Settings::Flush() != Result::SUCCESS) {
+        JST_ERROR("[COMPOSITOR_IMPL_DEFAULT] Failed to save settings during shutdown. Continuing cleanup.");
+    }
+
     return Result::SUCCESS;
 }
 
 Result DefaultCompositor::poll() {
+    // Route files dropped onto the window into the mail queue.
+
+    if (state.system.viewport) {
+        for (auto& path : state.system.viewport->takeDroppedFiles()) {
+            enqueue(MailDropFlowgraphPath{std::move(path)});
+        }
+    }
+
     std::deque<Mail> pending;
     pending.swap(pendingMail);
 
@@ -161,10 +226,17 @@ Result DefaultCompositor::poll() {
         JST_CHECK(actions.handle(mail));
     }
 
+    while (const auto error = Settings::TakePersistenceError()) {
+        callbacks.notify(Sakura::ToastType::Error, 5000, *error);
+    }
+
     // Surface completed async command results as notifications.
 
     Command completed;
     while (dequeue(completed)) {
+        if (completed.onComplete) {
+            completed.onComplete(completed.result);
+        }
         if (completed.silent) {
             continue;
         }
@@ -174,14 +246,21 @@ Result DefaultCompositor::poll() {
     // Update the state snapshots used by presenters.
 
     updateWorkbenchState();
+    updateFlowgraphBlockState();
     updateFilePendingState();
+    updateDependencyState();
     updateBenchmarkState();
     updateRemoteState();
-    updateStacksState();
+    updateUpdaterState();
+    actions.reconcileFilePicker();
+    actions.restoreStacks();
+    actions.refreshLiveMarkdown();
+    updateFeedbackState();
 
     // Build view configs while flowgraph access is confined to poll.
 
     workbench.update(presenters.build());
+    state.flowgraph.blocks.clear();
 
     return Result::SUCCESS;
 }
@@ -192,23 +271,38 @@ Result DefaultCompositor::present() {
         .render = state.system.render.get(),
     });
 
-    workbench.render(state.sakura.runtime.context());
+    const auto& ctx = state.sakura.runtime.context();
+    workbench.render(ctx);
 
     return Result::SUCCESS;
 }
 
 void DefaultCompositor::updateWorkbenchState() {
     if (state.interface.pendingFocusedFlowgraph.has_value() &&
-        state.flowgraph.items.contains(state.interface.pendingFocusedFlowgraph.value())) {
+        state.flowgraph.items.contains(*state.interface.pendingFocusedFlowgraph)) {
         state.interface.focusedFlowgraph = state.interface.pendingFocusedFlowgraph;
         state.interface.pendingFocusedFlowgraph.reset();
     }
 
     if (state.flowgraph.items.empty()) {
         state.interface.focusedFlowgraph.reset();
+        state.interface.flowgraphMetadataVisible = false;
+        state.interface.flowgraphMetadataSearch.clear();
+        state.interface.flowgraphEnvironmentVisible = false;
+        state.interface.flowgraphEnvironmentSearch.clear();
     } else if (state.interface.focusedFlowgraph.has_value() &&
                !state.flowgraph.items.contains(state.interface.focusedFlowgraph.value())) {
         state.interface.focusedFlowgraph.reset();
+        state.interface.flowgraphMetadataVisible = false;
+        state.interface.flowgraphMetadataSearch.clear();
+        state.interface.flowgraphEnvironmentVisible = false;
+        state.interface.flowgraphEnvironmentSearch.clear();
+    }
+
+    if (!state.interface.focusedFlowgraph.has_value() &&
+        !state.interface.pendingFocusedFlowgraph.has_value() &&
+        state.flowgraph.items.size() == 1) {
+        state.interface.focusedFlowgraph = state.flowgraph.items.begin()->first;
     }
 
     if (!state.modal.content.has_value()) {
@@ -228,10 +322,37 @@ void DefaultCompositor::updateWorkbenchState() {
         return;
     }
 
-    if (state.modal.content == ModalContent::RenameBlock &&
-        (!state.interface.focusedFlowgraph.has_value() || !state.modal.renameBlockOldName.has_value())) {
-        state.modal.content.reset();
-        state.modal.renameBlockOldName.reset();
+    if (state.modal.content == ModalContent::RenameBlock) {
+        const std::optional<std::string> targetFlowgraph = state.modal.flowgraph.has_value()
+            ? state.modal.flowgraph
+            : state.interface.focusedFlowgraph;
+        if (!targetFlowgraph.has_value() ||
+            !state.flowgraph.items.contains(targetFlowgraph.value()) ||
+            !state.modal.renameBlockOldName.has_value() ||
+            !state.flowgraph.items.at(targetFlowgraph.value())->view().has(state.modal.renameBlockOldName.value())) {
+            state.modal.content.reset();
+            state.modal.flowgraph.reset();
+            state.modal.renameBlockOldName.reset();
+        }
+    }
+}
+
+void DefaultCompositor::updateFlowgraphBlockState() {
+    state.flowgraph.blocks.clear();
+    for (const auto& [flowgraphId, flowgraph] : state.flowgraph.items) {
+        auto& blocks = state.flowgraph.blocks[flowgraphId];
+        std::vector<std::string> names;
+        if (!flowgraph || flowgraph->view().keys(names) != Result::SUCCESS) {
+            continue;
+        }
+        blocks.reserve(names.size());
+        for (auto& name : names) {
+            Flowgraph::View::BlockData data;
+            if (flowgraph->view().block(name, data) != Result::SUCCESS) {
+                continue;
+            }
+            blocks.push_back({std::move(name), std::move(data)});
+        }
     }
 }
 
@@ -243,6 +364,12 @@ void DefaultCompositor::updateFilePendingState() {
 #endif
 }
 
+void DefaultCompositor::updateDependencyState() {
+    auto snapshot = SnapshotPythonDependencyState();
+    state.runtime.dependencyRequest = std::move(snapshot.request);
+    state.runtime.dependencyGeneration = snapshot.generation;
+}
+
 void DefaultCompositor::updateBenchmarkState() {
     if (state.benchmark.running && state.benchmark.future.valid()) {
         const auto status = state.benchmark.future.wait_for(std::chrono::milliseconds(0));
@@ -252,8 +379,12 @@ void DefaultCompositor::updateBenchmarkState() {
         }
     }
 
+    if (!state.benchmark.running && state.modal.content != ModalContent::Benchmark) {
+        return;
+    }
+
     const U64 current = Benchmark::CurrentCount();
-    const U64 total = Benchmark::TotalCount();
+    const U64 total = Benchmark::TotalCount(state.benchmark.selectedModule);
     state.benchmark.progress = total > 0 ? static_cast<F32>(current) / static_cast<F32>(total) : 0.0f;
     state.benchmark.results = Benchmark::GetResults();
 }
@@ -271,45 +402,64 @@ void DefaultCompositor::updateRemoteState() {
     state.remote.waitlist = remoteStarted ? remote->waitlist() : std::vector<std::string>{};
 }
 
-void DefaultCompositor::updateStacksState() {
-    for (const auto& [flowgraphId, flowgraph] : state.flowgraph.items) {
-        if (!flowgraph || state.flowgraph.stacks.contains(flowgraphId)) {
-            continue;
-        }
-
-        auto& stacks = state.flowgraph.stacks[flowgraphId];
-        Parser::Map stackMap;
-        if (flowgraph->getMeta("stacks", stackMap) != Result::SUCCESS) {
-            JST_WARN("[COMPOSITOR_IMPL_DEFAULT] Failed to load stack metadata for flowgraph '{}'.", flowgraphId);
-            continue;
-        }
-
-        for (const auto& [stackId, encodedStack] : stackMap) {
-            if (stackId.empty() || encodedStack.type() != typeid(Parser::Map)) {
-                continue;
-            }
-
-            StackMeta meta;
-            if (meta.deserialize(std::any_cast<const Parser::Map&>(encodedStack)) != Result::SUCCESS) {
-                JST_WARN("[COMPOSITOR_IMPL_DEFAULT] Failed to decode stack '{}' for flowgraph '{}'.", stackId, flowgraphId);
-                continue;
-            }
-            if (meta.title.empty()) {
-                meta.title = stackId;
-            }
-            const bool restoreDockLayout = meta.layout.has_value();
-
-            stacks[stackId] = DefaultCompositorState::FlowgraphState::StackWindowState{
-                .meta = std::move(meta),
-                .restoreDockLayout = restoreDockLayout,
-                .dockInMainDockspace = true,
-            };
-        }
-    }
+void DefaultCompositor::updateUpdaterState() {
+    const auto update = updater.snapshot();
+    state.update.supported = update.supported;
+    state.update.upToDate = update.upToDate;
+    state.update.failed = update.failed;
+    state.update.checking = update.checking;
+    state.update.available = update.available;
+    state.update.downloading = update.downloading;
+    state.update.ready = update.ready;
+    state.update.applying = update.applying;
+    state.update.progress = update.progress;
+    state.update.version = update.version;
+    state.update.releaseNotes = update.releaseNotes;
+    state.update.message = update.message;
 }
 
 void DefaultCompositor::enqueue(Mail&& mail) {
     pendingMail.emplace_back(std::move(mail));
+}
+
+void DefaultCompositor::updateFeedbackState() {
+    const bool modalOpen = state.modal.content.has_value() &&
+                           state.modal.content.value() == ModalContent::Feedback;
+
+    const auto snapshot = feedback.snapshot();
+
+    switch (snapshot.status) {
+        case Feedback::Snapshot::Status::Idle:
+            if (state.feedback.status == DefaultCompositorState::FeedbackState::Status::Submitting) {
+                state.feedback.status = DefaultCompositorState::FeedbackState::Status::Idle;
+            }
+            if (!modalOpen &&
+                (state.feedback.status != DefaultCompositorState::FeedbackState::Status::Idle ||
+                 !state.feedback.text.empty())) {
+                state.feedback = {};
+                feedback.clear();
+            }
+            break;
+        case Feedback::Snapshot::Status::Submitting:
+            state.feedback.status = DefaultCompositorState::FeedbackState::Status::Submitting;
+            break;
+        case Feedback::Snapshot::Status::Success:
+            if (state.feedback.status == DefaultCompositorState::FeedbackState::Status::Submitting) {
+                callbacks.notify(Sakura::ToastType::Success, 5000,
+                                 "Feedback submitted. Thank you!");
+                feedback.clear();
+                state.feedback = {};
+            }
+            break;
+        case Feedback::Snapshot::Status::Error:
+            if (state.feedback.status == DefaultCompositorState::FeedbackState::Status::Submitting) {
+                callbacks.notify(Sakura::ToastType::Error, 5000,
+                                 snapshot.message);
+                feedback.clear();
+                state.feedback = {};
+            }
+            break;
+    }
 }
 
 std::shared_ptr<Compositor::Impl> DefaultCompositorFactory() {

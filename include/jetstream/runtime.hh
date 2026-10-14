@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "jetstream/types.hh"
@@ -15,19 +16,13 @@ enum class JETSTREAM_API RuntimeType : uint8_t {
     NONE = 0,
     NATIVE = 1 << 0,
     MLIR   = 1 << 1,
+    PYTHON = 1 << 2,
 };
 
 class JETSTREAM_API Runtime {
  public:
     struct Impl;
     struct Context;
-    struct Metrics {
-        std::string runtime;
-        std::string device;
-        std::string backend;
-        std::unordered_map<std::string, F32> averageComputeTime;
-        std::unordered_map<std::string, U64> cycles;
-    };
 
     typedef std::unordered_map<std::string, std::shared_ptr<Module>> Modules;
 
@@ -37,17 +32,16 @@ class JETSTREAM_API Runtime {
     Result destroy();
 
     Result compute(const std::vector<std::string>& modules,
-                   std::unordered_set<std::string>& skippedModules);
-
-    const std::shared_ptr<Metrics>& metrics() const;
+                   std::unordered_set<std::string>& skippedModules,
+                   std::unordered_set<std::string>& failedModules);
 
  private:
     std::shared_ptr<Impl> impl;
 };
 
-const char* GetRuntimeName(const RuntimeType& runtime);
-const char* GetRuntimePrettyName(const RuntimeType& runtime);
-RuntimeType StringToRuntime(const std::string& runtime);
+JETSTREAM_API const char* GetRuntimeName(const RuntimeType& runtime);
+JETSTREAM_API const char* GetRuntimePrettyName(const RuntimeType& runtime);
+JETSTREAM_API RuntimeType StringToRuntime(const std::string& runtime);
 
 inline constexpr RuntimeType operator|(RuntimeType lhs, RuntimeType rhs) {
     return static_cast<RuntimeType>(static_cast<uint8_t>(lhs) | static_cast<uint8_t>(rhs));

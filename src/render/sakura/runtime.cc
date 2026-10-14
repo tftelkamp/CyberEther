@@ -1,6 +1,8 @@
-#include <jetstream/render/sakura/runtime.hh>
+#include "runtime.hh"
 
-#include "base.hh"
+#include "helpers.hh"
+
+#include <jetstream/render/sakura/typography.hh>
 
 namespace Jetstream::Sakura {
 
@@ -9,13 +11,11 @@ struct Runtime::Impl {
         this->fontConfig = fontConfig;
         loadFonts();
         applyImGuiStyle();
-        setupMarkdown();
     }
 
     void update(Config config) {
         this->config = std::move(config);
         applyImGuiStyle();
-        setupMarkdown();
     }
 
     Context context() {
@@ -23,7 +23,6 @@ struct Runtime::Impl {
             .palette = activePalette(),
             .render = config.render,
             .fonts = fonts,
-            .markdownConfig = Private::ToMarkdownConfigHandle(&markdownConfig),
         };
     }
 
@@ -43,83 +42,6 @@ struct Runtime::Impl {
         return config.render->scalingFactor();
     }
 
-    void setupMarkdown() {
-        markdownConfig.linkCallback        = &Runtime::Impl::markdownLinkCallback;
-        markdownConfig.tooltipCallback     = nullptr;
-        markdownConfig.imageCallback       = nullptr;
-        markdownConfig.linkIcon            = ICON_FA_LINK;
-        markdownConfig.headingFormats[0]   = {Private::NativeFont(fonts.h1), true};
-        markdownConfig.headingFormats[1]   = {Private::NativeFont(fonts.h2), true};
-        markdownConfig.headingFormats[2]   = {Private::NativeFont(fonts.bold), false};
-        markdownConfig.userData            = this;
-        markdownConfig.formatCallback      = &Runtime::Impl::markdownFormatCallback;
-    }
-
-    static void markdownLinkCallback(ImGui::MarkdownLinkCallbackData data) {
-        if (!data.isImage) {
-            const std::string url(data.link, data.linkLength);
-            Platform::OpenUrl(url);
-        }
-    }
-
-    static void markdownFormatCallback(const ImGui::MarkdownFormatInfo& mdInfo, bool start) {
-        switch (mdInfo.type) {
-            case ImGui::MarkdownFormatType::NORMAL_TEXT:
-                break;
-            case ImGui::MarkdownFormatType::EMPHASIS: {
-                ImGui::MarkdownHeadingFormat fmt;
-                fmt = mdInfo.config->headingFormats[ImGui::MarkdownConfig::NUMHEADINGS - 1];
-                if (start) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
-                    if (fmt.font) {
-                        ImGui::PushFont(fmt.font, 0.0f);
-                    }
-                } else {
-                    if (fmt.font) {
-                        ImGui::PopFont();
-                    }
-                    ImGui::PopStyleColor();
-                }
-                break;
-            }
-            case ImGui::MarkdownFormatType::HEADING: {
-                ImGui::MarkdownHeadingFormat fmt;
-                if (mdInfo.level > ImGui::MarkdownConfig::NUMHEADINGS) {
-                    fmt = mdInfo.config->headingFormats[ImGui::MarkdownConfig::NUMHEADINGS - 1];
-                } else {
-                    fmt = mdInfo.config->headingFormats[mdInfo.level - 1];
-                }
-                if (start) {
-                    if (fmt.font) {
-                        ImGui::PushFont(fmt.font, 0.0f);
-                    }
-                } else {
-                    if (fmt.separator) {
-                        ImGui::Separator();
-                    }
-                    if (fmt.font) {
-                        ImGui::PopFont();
-                    }
-                }
-                break;
-            }
-            case ImGui::MarkdownFormatType::UNORDERED_LIST:
-                break;
-            case ImGui::MarkdownFormatType::LINK: {
-                const ImVec4 linkColor(0.278f, 0.498f, 0.937f, 1.0f);
-                if (start) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertFloat4ToU32(linkColor));
-                } else {
-                    ImGui::PopStyleColor();
-                    if (mdInfo.itemHovered) {
-                        ImGui::UnderLine(ImGui::ColorConvertFloat4ToU32(linkColor));
-                    }
-                }
-                break;
-            }
-        }
-    }
-
     void loadFonts() {
         if (!fontConfig.body.valid() || !fontConfig.bold.valid()) {
             return;
@@ -137,7 +59,7 @@ struct Runtime::Impl {
         fonts.body = Private::ToFontHandle(io.Fonts->AddFontFromMemoryCompressedTTF(
             this->fontConfig.body.data,
             static_cast<int>(this->fontConfig.body.size),
-            15.0f * fontScalingFactor,
+            Typography::FontSize * fontScalingFactor,
             &fontConfig,
             nullptr));
 
@@ -147,7 +69,7 @@ struct Runtime::Impl {
             iconFontConfig.OversampleV = 5;
             iconFontConfig.FontLoaderFlags = 1;
             iconFontConfig.MergeMode = true;
-            iconFontConfig.GlyphMinAdvanceX = 15.0f * fontScalingFactor;
+            iconFontConfig.GlyphMinAdvanceX = Typography::FontSize * fontScalingFactor;
             iconFontConfig.GlyphOffset = {0.0f, 2.0f};
 
             static const ImWchar iconRanges[] = {ICON_MIN_FA, ICON_MAX_FA, 0};
@@ -155,14 +77,14 @@ struct Runtime::Impl {
             if (this->fontConfig.iconRegular.valid()) {
                 io.Fonts->AddFontFromMemoryCompressedTTF(this->fontConfig.iconRegular.data,
                                                          static_cast<int>(this->fontConfig.iconRegular.size),
-                                                         15.0f * fontScalingFactor,
+                                                         Typography::FontSize * fontScalingFactor,
                                                          &iconFontConfig,
                                                          iconRanges);
             }
             if (this->fontConfig.iconSolid.valid()) {
                 io.Fonts->AddFontFromMemoryCompressedTTF(this->fontConfig.iconSolid.data,
                                                          static_cast<int>(this->fontConfig.iconSolid.size),
-                                                         15.0f * fontScalingFactor,
+                                                         Typography::FontSize * fontScalingFactor,
                                                          &iconFontConfig,
                                                          iconRanges);
             }
@@ -171,21 +93,30 @@ struct Runtime::Impl {
         fonts.h1 = Private::ToFontHandle(io.Fonts->AddFontFromMemoryCompressedTTF(
             this->fontConfig.bold.data,
             static_cast<int>(this->fontConfig.bold.size),
-            15.0f * fontScalingFactor * 1.15f,
+            Typography::FontSize * fontScalingFactor * Typography::ChromeH1Scale,
             &fontConfig,
             nullptr));
         fonts.h2 = Private::ToFontHandle(io.Fonts->AddFontFromMemoryCompressedTTF(
             this->fontConfig.bold.data,
             static_cast<int>(this->fontConfig.bold.size),
-            15.0f * fontScalingFactor * 1.10f,
+            Typography::FontSize * fontScalingFactor * Typography::ChromeH2Scale,
             &fontConfig,
             nullptr));
         fonts.bold = Private::ToFontHandle(io.Fonts->AddFontFromMemoryCompressedTTF(
             this->fontConfig.bold.data,
             static_cast<int>(this->fontConfig.bold.size),
-            15.0f * fontScalingFactor * 1.04f,
+            Typography::FontSize * fontScalingFactor * Typography::ChromeBoldScale,
             &fontConfig,
             nullptr));
+
+        if (this->fontConfig.display.valid()) {
+            fonts.display = Private::ToFontHandle(io.Fonts->AddFontFromMemoryCompressedTTF(
+                this->fontConfig.display.data,
+                static_cast<int>(this->fontConfig.display.size),
+                Typography::FontSize * fontScalingFactor * Typography::DisplayScale,
+                &fontConfig,
+                nullptr));
+        }
     }
 
     void applyImGuiStyle() const {
@@ -310,7 +241,6 @@ struct Runtime::Impl {
     Config config;
     Fonts fonts;
     F32 fontScalingFactor = 1.0f;
-    ImGui::MarkdownConfig markdownConfig;
 };
 
 Runtime::Runtime() {

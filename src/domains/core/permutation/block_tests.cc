@@ -3,6 +3,7 @@
 #include "jetstream/domains/core/permutation/block.hh"
 #include "jetstream/domains/core/expand_dims/block.hh"
 #include "jetstream/domains/dsp/window/block.hh"
+#include "jetstream/registry.hh"
 #include "flowgraph_fixture.hh"
 
 using namespace Jetstream;
@@ -19,12 +20,13 @@ TEST_CASE_METHOD(FlowgraphFixture,
 
     Blocks::Permutation config;
     REQUIRE(flowgraph->blockCreate("perm_block", config, inputs) == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("perm_block")->state() == Block::State::Created);
-    REQUIRE(flowgraph->blockList().at("perm_block")->outputs().count("buffer") == 1);
+    REQUIRE(viewBlock("perm_block").state == Block::State::Created);
+    REQUIRE(viewBlock("perm_block").outputs.count("buffer") == 1);
 
     Parser::Map saved;
     REQUIRE(flowgraph->blockConfig("perm_block", saved) == Result::SUCCESS);
     REQUIRE(saved.contains("permutation"));
+    REQUIRE(saved.contains("contiguous"));
 }
 
 TEST_CASE_METHOD(FlowgraphFixture,
@@ -48,7 +50,7 @@ TEST_CASE_METHOD(FlowgraphFixture,
     inputs["buffer"].requested("perm_expand", "buffer");
     REQUIRE(flowgraph->blockCreate("perm_recfg", config, inputs) == Result::SUCCESS);
 
-    const Tensor& initialOut = flowgraph->blockList().at("perm_recfg")->outputs().at("buffer").tensor;
+    const Tensor initialOut = viewBlock("perm_recfg").outputs.at("buffer").tensor;
     REQUIRE(initialOut.shape(0) == 16);
     REQUIRE(initialOut.shape(1) == 1);
 
@@ -56,10 +58,73 @@ TEST_CASE_METHOD(FlowgraphFixture,
     update["permutation"] = std::vector<U64>{0, 1};
     REQUIRE(flowgraph->blockReconfigure("perm_recfg", update) == Result::SUCCESS);
 
-    const Tensor& updatedOut = flowgraph->blockList().at("perm_recfg")->outputs().at("buffer").tensor;
+    const Tensor updatedOut = viewBlock("perm_recfg").outputs.at("buffer").tensor;
     REQUIRE(updatedOut.shape(0) == 1);
     REQUIRE(updatedOut.shape(1) == 16);
-    REQUIRE(flowgraph->blockList().at("perm_recfg")->state() == Block::State::Created);
+    REQUIRE(viewBlock("perm_recfg").state == Block::State::Created);
+}
+
+TEST_CASE_METHOD(FlowgraphFixture,
+                 "Permutation block materializes contiguous output when requested",
+                 "[modules][permutation][block][contiguous]") {
+    Blocks::Window source;
+    source.size = 16;
+    REQUIRE(flowgraph->blockCreate("perm_contig_src", source, {}) == Result::SUCCESS);
+
+    Blocks::ExpandDims expand;
+    expand.axis = 1;
+
+    TensorMap expandInputs;
+    expandInputs["buffer"].requested("perm_contig_src", "window");
+    REQUIRE(flowgraph->blockCreate("perm_contig_expand", expand, expandInputs) == Result::SUCCESS);
+
+    Blocks::Permutation config;
+    config.permutation = {1, 0};
+    config.contiguous = true;
+
+    TensorMap inputs;
+    inputs["buffer"].requested("perm_contig_expand", "buffer");
+    REQUIRE(flowgraph->blockCreate("perm_contig", config, inputs) == Result::SUCCESS);
+
+    const Tensor output = viewBlock("perm_contig").outputs.at("buffer").tensor;
+    REQUIRE(output.shape(0) == 1);
+    REQUIRE(output.shape(1) == 16);
+    REQUIRE(output.contiguous());
+}
+
+TEST_CASE_METHOD(FlowgraphFixture, "Permutation block keeps contiguous copies on CUDA",
+                 "[modules][permutation][block][CUDA]") {
+    if (Registry::ListAvailableModules("window", DeviceType::CUDA).empty() ||
+        Registry::ListAvailableModules("expand_dims", DeviceType::CUDA).empty() ||
+        Registry::ListAvailableModules("permutation", DeviceType::CUDA).empty() ||
+        Registry::ListAvailableModules("duplicate", DeviceType::CUDA).empty()) {
+        SUCCEED("Required CUDA modules are unavailable in this build.");
+        return;
+    }
+
+    Blocks::Window source;
+    source.size = 16;
+    REQUIRE(flowgraph->blockCreate("perm_cuda_src", source, {}, DeviceType::CUDA) ==
+            Result::SUCCESS);
+
+    Blocks::ExpandDims expand;
+    expand.axis = 1;
+    TensorMap expandInputs;
+    expandInputs["buffer"].requested("perm_cuda_src", "window");
+    REQUIRE(flowgraph->blockCreate("perm_cuda_expand", expand, expandInputs,
+                                   DeviceType::CUDA) == Result::SUCCESS);
+
+    Blocks::Permutation config;
+    config.permutation = {1, 0};
+    config.contiguous = true;
+    TensorMap inputs;
+    inputs["buffer"].requested("perm_cuda_expand", "buffer");
+    REQUIRE(flowgraph->blockCreate("perm_cuda", config, inputs, DeviceType::CUDA) ==
+            Result::SUCCESS);
+
+    const auto block = viewBlock("perm_cuda");
+    REQUIRE(block.state == Block::State::Created);
+    REQUIRE(block.outputs.at("buffer").tensor.device() == DeviceType::CUDA);
 }
 
 TEST_CASE_METHOD(FlowgraphFixture,
@@ -73,11 +138,11 @@ TEST_CASE_METHOD(FlowgraphFixture,
     REQUIRE(flowgraph->blockCreate("perm_life", "permutation", {}, inputs) == Result::SUCCESS);
 
     REQUIRE(flowgraph->blockDisconnect("perm_life", "buffer") == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("perm_life")->state() == Block::State::Incomplete);
+    REQUIRE(viewBlock("perm_life").state == Block::State::Incomplete);
 
     REQUIRE(flowgraph->blockConnect("perm_life", "buffer", "perm_life_src", "window") ==
             Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("perm_life")->state() == Block::State::Created);
+    REQUIRE(viewBlock("perm_life").state == Block::State::Created);
 }
 
 TEST_CASE_METHOD(FlowgraphFixture,
@@ -92,5 +157,11 @@ TEST_CASE_METHOD(FlowgraphFixture,
     Blocks::Permutation config;
     config.permutation = {1, 1};
     REQUIRE(flowgraph->blockCreate("perm_bad", config, inputs) == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("perm_bad")->state() == Block::State::Errored);
+    REQUIRE(viewBlock("perm_bad").state == Block::State::Errored);
+    REQUIRE(viewBlock("perm_bad").outputs.empty());
+
+    config.permutation = {1, 0};
+    REQUIRE(flowgraph->blockCreate("perm_rank_bad", config, inputs) == Result::SUCCESS);
+    REQUIRE(viewBlock("perm_rank_bad").state == Block::State::Errored);
+    REQUIRE(viewBlock("perm_rank_bad").outputs.empty());
 }

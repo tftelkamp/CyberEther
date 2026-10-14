@@ -4,6 +4,7 @@
 
 #include "flowgraph_fixture.hh"
 #include "jetstream/registry.hh"
+#include "test_server.hh"
 
 using namespace Jetstream;
 
@@ -20,8 +21,29 @@ TEST_CASE_METHOD(FlowgraphFixture,
 
     REQUIRE(flowgraph->blockCreate("ws_invalid", "websocket", config, {}) ==
             Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("ws_invalid")->state() ==
-            Block::State::Errored);
+    const auto block = viewBlock("ws_invalid");
+    REQUIRE(block.state == Block::State::Errored);
+    REQUIRE(block.outputs.empty());
+    REQUIRE(block.diagnostic.find("[MODULE_WEBSOCKET]") != std::string::npos);
+}
+
+TEST_CASE_METHOD(FlowgraphFixture,
+                 "Websocket block propagates module URL validation",
+                 "[modules][io][websocket][block][validation]") {
+    if (Registry::ListAvailableModules("websocket").empty()) {
+        SUCCEED("Websocket module is unavailable in this build.");
+        return;
+    }
+
+    Parser::Map config;
+    config["url"] = std::string("ws://localhost:9000/feed#fragment");
+    REQUIRE(flowgraph->blockCreate("ws_bad_url", "websocket", config, {}) ==
+            Result::SUCCESS);
+
+    const auto block = viewBlock("ws_bad_url");
+    REQUIRE(block.state == Block::State::Errored);
+    REQUIRE(block.outputs.empty());
+    REQUIRE(block.diagnostic.find("[MODULE_WEBSOCKET]") != std::string::npos);
 }
 
 TEST_CASE_METHOD(FlowgraphFixture,
@@ -36,45 +58,59 @@ TEST_CASE_METHOD(FlowgraphFixture,
     zeroBatches["numberOfBatches"] = std::string("0");
     REQUIRE(flowgraph->blockCreate("ws_bad_batches", "websocket",
                                    zeroBatches, {}) == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("ws_bad_batches")->state() ==
+    REQUIRE(viewBlock("ws_bad_batches").state ==
             Block::State::Errored);
 
     Parser::Map zeroSamples;
     zeroSamples["numberOfTimeSamples"] = std::string("0");
     REQUIRE(flowgraph->blockCreate("ws_bad_samples", "websocket",
                                    zeroSamples, {}) == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("ws_bad_samples")->state() ==
+    REQUIRE(viewBlock("ws_bad_samples").state ==
             Block::State::Errored);
 
     Parser::Map zeroMultiplier;
     zeroMultiplier["bufferMultiplier"] = std::string("0");
     REQUIRE(flowgraph->blockCreate("ws_bad_multiplier", "websocket",
                                    zeroMultiplier, {}) == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("ws_bad_multiplier")->state() ==
+    REQUIRE(viewBlock("ws_bad_multiplier").state ==
             Block::State::Errored);
 }
 
 TEST_CASE_METHOD(FlowgraphFixture,
-                 "Websocket block reconfigure updates output dimensions",
+                 "Websocket block recreates from incomplete with a valid URL",
                  "[modules][io][websocket][block][reconfigure]") {
+#ifdef JST_OS_BROWSER
+    SUCCEED("Native lifecycle coverage requires the local WebSocket server.");
+    return;
+#else
     if (Registry::ListAvailableModules("websocket").empty()) {
         SUCCEED("Websocket module is unavailable in this build.");
         return;
     }
 
+    Tests::WebsocketTestServer server;
+    REQUIRE(server.valid());
+
     Parser::Map config;
     config["url"] = std::string("");
-    REQUIRE(flowgraph->blockCreate("ws_cfg", "websocket", config, {}) ==
+    REQUIRE(flowgraph->blockCreate("ws_lifecycle", "websocket", config, {}) ==
             Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("ws_cfg")->state() ==
+    REQUIRE(viewBlock("ws_lifecycle").state ==
             Block::State::Incomplete);
 
     Parser::Map reconfigure;
-    reconfigure["url"] = std::string("ws://localhost:9000");
-    reconfigure["dataType"] = std::string("CU8");
-    reconfigure["numberOfBatches"] = std::string("2");
-    reconfigure["numberOfTimeSamples"] = std::string("256");
-    reconfigure["bufferMultiplier"] = std::string("2");
-    REQUIRE(flowgraph->blockReconfigure("ws_cfg", reconfigure) == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().find("ws_cfg") != flowgraph->blockList().end());
+    reconfigure["url"] = server.url();
+    reconfigure["dataType"] = std::string("U8");
+    reconfigure["numberOfBatches"] = std::string("1");
+    reconfigure["numberOfTimeSamples"] = std::string("1");
+    reconfigure["bufferMultiplier"] = std::string("1");
+    REQUIRE(flowgraph->blockReconfigure("ws_lifecycle", reconfigure) ==
+            Result::SUCCESS);
+
+    const auto block = viewBlock("ws_lifecycle");
+    REQUIRE(block.state == Block::State::Created);
+    REQUIRE(block.outputs.at("signal").tensor.dtype() == DataType::U8);
+    REQUIRE(block.outputs.at("signal").tensor.shape() == Shape{1, 1});
+    REQUIRE(flowgraph->blockDestroy("ws_lifecycle", false) == Result::SUCCESS);
+#endif
 }

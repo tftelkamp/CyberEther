@@ -82,6 +82,21 @@ def plot(
         if not isinstance(k, str):
             raise TypeError("Options keys must be strings.")
 
+    normalized_options = options.copy()
+    if "fill" in normalized_options:
+        if not isinstance(normalized_options["fill"], bool):
+            raise TypeError("Option 'fill' must be a boolean.")
+        normalized_options["fill"] = int(normalized_options["fill"])
+
+    for key in ("frequency", "sampleRate"):
+        if key not in normalized_options:
+            continue
+        if isinstance(normalized_options[key], bool) or not isinstance(
+            normalized_options[key], (int, float)
+        ):
+            raise TypeError(f"Option '{key}' must be numeric.")
+        normalized_options[key] = float(normalized_options[key])
+
     #
     # Check constants.
     #
@@ -127,7 +142,7 @@ def plot(
     cfg.batch_axis = batch_axis
     cfg.channel_axis = channel_axis
     cfg.channel_index = channel_index
-    cfg.options = options
+    cfg.options = normalized_options
 
     lm.plot(label, mosaic, cfg)
 
@@ -274,19 +289,6 @@ def slider(label: str, min_val: float, max_val: float, value: list):
         raise ValueError("Value must be a list with exactly one element")
 
     lm.slider(label, min_val, max_val, value)
-
-
-def markdown(content: str):
-    """
-    Display markdown formatted text.
-
-    Args:
-        content: The markdown content to display
-    """
-    if not isinstance(content, str):
-        raise TypeError("Content must be a string.")
-
-    lm.markdown(content)
 
 
 def remote_room_id() -> str:

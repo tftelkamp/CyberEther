@@ -12,10 +12,11 @@
 
 namespace Jetstream::Render::Components {
 
-class Font : public Generic {
+class JETSTREAM_API Font : public Generic {
  public:
     struct Config {
         F32 size = 13.0f;
+        bool icons = false;
         const void* data = nullptr;
     };
 
@@ -28,6 +29,12 @@ class Font : public Generic {
     constexpr const Config& getConfig() const {
         return config;
     }
+
+    I32 ascent() const;
+    I32 descent() const;
+    I32 lineHeight() const;
+    F32 atlasScale() const;
+    F32 atlasPixelRange() const;
 
  protected:
     struct Glyph {

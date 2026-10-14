@@ -27,8 +27,8 @@ Result SqueezeDimsImpl::define() {
 
     JST_CHECK(defineInterfaceConfig("axis",
                                     "Axis",
-                                    "Position of the dimension to remove (must have size 1).",
-                                    "int:"));
+                                    "Position of the dimension to remove (must have size 1). Negative axes count from the end.",
+                                    {{"type", "int"}}));
 
     return Result::SUCCESS;
 }
@@ -43,6 +43,6 @@ Result SqueezeDimsImpl::create() {
     return Result::SUCCESS;
 }
 
-JST_REGISTER_BLOCK(SqueezeDimsImpl);
+JST_REGISTER_BLOCK(SqueezeDimsImpl, {"squeeze_dims"});
 
 }  // namespace Jetstream::Blocks

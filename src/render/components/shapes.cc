@@ -62,6 +62,9 @@ struct Shapes::Impl {
 
     // Render.
 
+    bool enabled = true;
+    bool visible = true;
+
     bool updateUniformBufferFlag = false;
     bool updateVerticesBufferFlag = false;
     bool updateIndicesBufferFlag = false;
@@ -161,7 +164,6 @@ Result Shapes::create(Window* window) {
         cfg.size = 1;
         cfg.target = Render::Buffer::Target::UNIFORM;
         JST_CHECK(window->build(pimpl->uniformBuffer, cfg));
-        JST_CHECK(window->bind(pimpl->uniformBuffer));
     }
 
     {
@@ -171,7 +173,6 @@ Result Shapes::create(Window* window) {
         cfg.size = pimpl->vertices.size();
         cfg.target = Render::Buffer::Target::VERTEX;
         JST_CHECK(window->build(pimpl->verticesBuffer, cfg));
-        JST_CHECK(window->bind(pimpl->verticesBuffer));
     }
 
     {
@@ -181,7 +182,6 @@ Result Shapes::create(Window* window) {
         cfg.size = pimpl->instances.size();
         cfg.target = Render::Buffer::Target::VERTEX | Render::Buffer::Target::STORAGE;
         JST_CHECK(window->build(pimpl->instanceBuffer, cfg));
-        JST_CHECK(window->bind(pimpl->instanceBuffer));
     }
 
     {
@@ -191,7 +191,6 @@ Result Shapes::create(Window* window) {
         cfg.size = pimpl->indices.size();
         cfg.target = Render::Buffer::Target::VERTEX_INDICES;
         JST_CHECK(window->build(pimpl->indicesBuffer, cfg));
-        JST_CHECK(window->bind(pimpl->indicesBuffer));
     }
 
     // Create compute kernel buffers.
@@ -203,7 +202,6 @@ Result Shapes::create(Window* window) {
         cfg.size = pimpl->properties.size();
         cfg.target = Render::Buffer::Target::STORAGE;
         JST_CHECK(window->build(pimpl->propertiesBuffer, cfg));
-        JST_CHECK(window->bind(pimpl->propertiesBuffer));
     }
 
     {
@@ -218,7 +216,6 @@ Result Shapes::create(Window* window) {
         cfg.enableZeroCopy = pimpl->optimalInstanceColors.device() == window->device();
         cfg.target = Render::Buffer::Target::STORAGE;
         JST_CHECK(window->build(pimpl->colorsBuffer, cfg));
-        JST_CHECK(window->bind(pimpl->colorsBuffer));
     }
 
     {
@@ -233,7 +230,6 @@ Result Shapes::create(Window* window) {
         cfg.enableZeroCopy = pimpl->optimalInstanceRotations.device() == window->device();
         cfg.target = Render::Buffer::Target::STORAGE;
         JST_CHECK(window->build(pimpl->rotationsBuffer, cfg));
-        JST_CHECK(window->bind(pimpl->rotationsBuffer));
     }
 
     {
@@ -248,7 +244,6 @@ Result Shapes::create(Window* window) {
         cfg.enableZeroCopy = pimpl->optimalInstanceSizes.device() == window->device();
         cfg.target = Render::Buffer::Target::STORAGE;
         JST_CHECK(window->build(pimpl->sizesBuffer, cfg));
-        JST_CHECK(window->bind(pimpl->sizesBuffer));
     }
 
     {
@@ -263,7 +258,6 @@ Result Shapes::create(Window* window) {
         cfg.enableZeroCopy = pimpl->optimalInstancePositions.device() == window->device();
         cfg.target = Render::Buffer::Target::STORAGE;
         JST_CHECK(window->build(pimpl->positionsBuffer, cfg));
-        JST_CHECK(window->bind(pimpl->positionsBuffer));
     }
 
     {
@@ -316,6 +310,7 @@ Result Shapes::create(Window* window) {
         };
         cfg.enableAlphaBlending = true;
         JST_CHECK(window->build(pimpl->program, cfg));
+        pimpl->program->setEnabled(pimpl->enabled && pimpl->visible);
     }
 
     // Create element data.
@@ -370,20 +365,8 @@ Result Shapes::create(Window* window) {
     return Result::SUCCESS;
 }
 
-Result Shapes::destroy(Window* window) {
+Result Shapes::destroy(Window*) {
     JST_DEBUG("[SHAPES] Unloading shapes.");
-
-    JST_CHECK(window->unbind(pimpl->uniformBuffer));
-    JST_CHECK(window->unbind(pimpl->verticesBuffer));
-    JST_CHECK(window->unbind(pimpl->instanceBuffer));
-    JST_CHECK(window->unbind(pimpl->indicesBuffer));
-
-    // Unbind compute buffers
-    JST_CHECK(window->unbind(pimpl->propertiesBuffer));
-    JST_CHECK(window->unbind(pimpl->colorsBuffer));
-    JST_CHECK(window->unbind(pimpl->rotationsBuffer));
-    JST_CHECK(window->unbind(pimpl->sizesBuffer));
-    JST_CHECK(window->unbind(pimpl->positionsBuffer));
 
     return Result::SUCCESS;
 }
@@ -508,6 +491,33 @@ Result Shapes::updateSizes(const std::string&) {
     return Result::SUCCESS;
 }
 
+Result Shapes::updateProperties(const std::string& elementId,
+                                F32 cornerRadius,
+                                F32 borderWidth,
+                                const ColorRGBA<F32>& borderColor) {
+    const auto it = pimpl->elementIndex.find(elementId);
+    if (it == pimpl->elementIndex.end()) {
+        JST_ERROR("[SHAPES] Element not found (properties).");
+        return Result::ERROR;
+    }
+
+    // The instance buffer concatenates elements in insertion order.
+    U64 instanceOffset = 0;
+    for (U64 i = 0; i < it->second; ++i) {
+        instanceOffset += pimpl->elements[i].config.numberOfInstances;
+    }
+
+    const auto& element = pimpl->elements[it->second];
+    for (U64 i = 0; i < element.config.numberOfInstances; ++i) {
+        auto& prop = pimpl->properties.at(instanceOffset + i);
+        prop.borderColor = glm::vec4(borderColor.r, borderColor.g, borderColor.b, borderColor.a);
+        prop.shapeParams = glm::vec4(element.config.type, borderWidth, cornerRadius, 0.0f);
+    }
+
+    pimpl->updatePropertiesBufferFlag = true;
+    return Result::SUCCESS;
+}
+
 Result Shapes::Impl::updateUniforms() {
     // Set data.
     uniforms.pixelSize = glm::vec2(config.pixelSize.x, config.pixelSize.y);
@@ -550,6 +560,11 @@ Result Shapes::updatePixelSize(const Extent2D<F32>& pixelSize) {
 Result Shapes::updateScissorRect(const std::optional<Render::ScissorRect>& rect) {
     pimpl->program->scissorRect(rect);
     return Result::SUCCESS;
+}
+
+void Shapes::enabled(bool value) {
+    pimpl->enabled = value;
+    pimpl->program->setEnabled(pimpl->enabled && pimpl->visible);
 }
 
 Result Shapes::present() {
@@ -598,6 +613,13 @@ Result Shapes::present() {
     }
 
     if (pimpl->updateSizeBufferFlag) {
+        pimpl->visible = false;
+        for (const auto& element : pimpl->elements) {
+            for (const auto& size : element.instanceSizesBuffer) {
+                pimpl->visible |= size.x != 0.0f && size.y != 0.0f;
+            }
+        }
+        pimpl->program->setEnabled(pimpl->enabled && pimpl->visible);
         pimpl->sizesBuffer->update();
         pimpl->updateSizeBufferFlag = false;
         pimpl->computeInstanceBufferFlag = true;

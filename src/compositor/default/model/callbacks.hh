@@ -1,12 +1,14 @@
 #ifndef JETSTREAM_COMPOSITOR_IMPL_DEFAULT_MODEL_CALLBACKS_HH
 #define JETSTREAM_COMPOSITOR_IMPL_DEFAULT_MODEL_CALLBACKS_HH
 
+#include "file_picker.hh"
 #include "messages.hh"
 
-#include "jetstream/render/sakura/toast.hh"
+#include "jetstream/render/sakura/base.hh"
 #include "jetstream/types.hh"
 
 #include <functional>
+#include <optional>
 #include <string>
 
 namespace Jetstream {
@@ -14,9 +16,19 @@ namespace Jetstream {
 struct DefaultCompositorCallbacks {
     std::function<void(Mail&&)> enqueueMail;
     std::function<void(std::function<Result()>, bool)> enqueueCommand;
+    std::function<void(std::function<Result()>, bool, Mail)> enqueueCommandWithMail;
     std::function<void(Sakura::ToastType, I32, const std::string&)> notify;
     std::function<void(Result, const std::string&)> notifyResult;
     std::function<void(const std::string&)> setClipboardText;
+    std::function<Result(FilePickerRequest)> requestFile;
+    std::function<void(const std::string&, const std::string&, Rect, Extent2D<F32>,
+                       std::optional<Extent2D<F32>>)> recordNodeBounds;
+    std::function<void(const std::string&, Rect, Rect)> recordViewport;
+    std::function<void()> checkForUpdates;
+    std::function<void()> downloadUpdate;
+    std::function<bool()> applyUpdate;
+    std::function<void()> dismissUpdate;
+    std::function<void(const std::string&)> submitFeedback;
 };
 
 }  // namespace Jetstream

@@ -13,7 +13,7 @@ Result NoteImpl::define() {
     JST_CHECK(defineInterfaceConfig("content",
                                     "Content",
                                     "Markdown text to display.",
-                                    "markdown"));
+                                    {{"type", "markdown"}}));
 
     return Result::SUCCESS;
 }
@@ -22,6 +22,6 @@ Result NoteImpl::create() {
     return Result::SUCCESS;
 }
 
-JST_REGISTER_BLOCK(NoteImpl);
+JST_REGISTER_BLOCK_NO_MODULES(NoteImpl);
 
 }  // namespace Jetstream::Blocks

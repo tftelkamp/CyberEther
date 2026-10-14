@@ -1,13 +1,13 @@
 #ifndef JETSTREAM_COMPOSITOR_IMPL_DEFAULT_VIEWS_FLOWGRAPH_PICKER_HH
 #define JETSTREAM_COMPOSITOR_IMPL_DEFAULT_VIEWS_FLOWGRAPH_PICKER_HH
 
-#include "jetstream/render/sakura/sakura.hh"
+#include "jetstream/render/sakura/base.hh"
 #include "jetstream/render/tools/imgui_icons_ext.hh"
 
 #include "jetstream/types.hh"
+#include "tools/value.hh"
 
 #include <algorithm>
-#include <cctype>
 #include <functional>
 #include <string>
 #include <utility>
@@ -15,7 +15,7 @@
 
 namespace Jetstream {
 
-struct FlowgraphBlockPicker : public Sakura::Component {
+struct FlowgraphBlockPicker {
     struct DeviceOption {
         DeviceType device = DeviceType::CPU;
         RuntimeType runtime = RuntimeType::NATIVE;
@@ -51,7 +51,7 @@ struct FlowgraphBlockPicker : public Sakura::Component {
 
         popup.update({
             .id = this->config.id + ":popup",
-            .size = Extent2D<F32>{720.0f, 560.0f},
+            .size = Extent2D<F32>{800.0f, 640.0f},
             .padding = Extent2D<F32>{12.0f, 12.0f},
             .rounding = 16.0f,
             .borderSize = 1.0f,
@@ -111,7 +111,7 @@ struct FlowgraphBlockPicker : public Sakura::Component {
         splitView.update({
             .id = this->config.id + ":split",
             .leftWidth = 210.0f,
-            .height = 437.0f,
+            .height = 517.0f,
         });
 
         leftPanel.update({
@@ -135,7 +135,7 @@ struct FlowgraphBlockPicker : public Sakura::Component {
 
         documentationPanel.update({
             .id = this->config.id + ":documentation",
-            .padding = 10.0f,
+            .padding = 7.0f,
             .rounding = 10.0f,
             .border = true,
             .scrollbar = false,
@@ -221,6 +221,7 @@ struct FlowgraphBlockPicker : public Sakura::Component {
             detailMarkdown.update({
                 .id = this->config.id + ":detail-md",
                 .value = selected.description,
+                .backgroundColorKey = "card",
             });
         }
 
@@ -363,14 +364,6 @@ struct FlowgraphBlockPicker : public Sakura::Component {
         bool titleMatch = false;
     };
 
-    static std::string normalize(const std::string& value) {
-        std::string normalized = value;
-        std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) {
-            return static_cast<char>(std::tolower(c));
-        });
-        return normalized;
-    }
-
     std::vector<std::string> buildCategories() const {
         std::vector<std::string> categories = {"All"};
         const std::vector<std::string> preferred = {"Core", "DSP", "Visualization", "IO", "Other"};
@@ -400,12 +393,12 @@ struct FlowgraphBlockPicker : public Sakura::Component {
     }
 
     std::vector<BlockItem> filteredBlocks() const {
-        const std::string normalizedQuery = normalize(config.search);
+        const std::string normalizedQuery = Text::ToLower(config.search);
         auto matchPriority = [&](const std::string& title, const std::string& summary) -> int {
             if (normalizedQuery.empty()) return 0;
 
-            const std::string normalizedTitle = normalize(title);
-            const std::string normalizedSummary = normalize(summary);
+            const std::string normalizedTitle = Text::ToLower(title);
+            const std::string normalizedSummary = Text::ToLower(summary);
             if (normalizedTitle.find(normalizedQuery) != std::string::npos) return 0;
             if (normalizedSummary.find(normalizedQuery) != std::string::npos) return 1;
             return -1;
@@ -497,7 +490,7 @@ struct FlowgraphBlockPicker : public Sakura::Component {
     Sakura::Text noMatches;
     Sakura::Text footerText;
     Sakura::VStack detailLayout;
-    Sakura::Markdown detailMarkdown;
+    Sakura::Retained::MarkdownView detailMarkdown;
 };
 
 }  // namespace Jetstream

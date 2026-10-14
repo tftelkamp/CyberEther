@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 
 #include <jetstream/detail/module_surface_impl.hh>
 #include <jetstream/surface.hh>
@@ -16,7 +17,7 @@ F32 ClampPanOffsetLimit(const F32 zoom) {
 
 SurfaceInteractionState ProcessSurfaceInteraction(SurfaceInteractionState state,
                                                    std::vector<SurfaceEvent>&& surfaceEvents,
-                                                   std::vector<MouseEvent>&& mouseEvents,
+                                                   std::vector<InputEvent>&& inputEvents,
                                                    const SurfaceInteractionConfig& config) {
     // Reset change flags.
 
@@ -30,21 +31,29 @@ SurfaceInteractionState ProcessSurfaceInteraction(SurfaceInteractionState state,
             const bool validSize = event.size.x > 0 && event.size.y > 0;
             const bool sizeChanged = validSize && event.size != state.viewSize;
             const bool scaleChanged = std::abs(event.scale - state.scale) > 1e-6f;
+            const bool placementChanged = event.placement != state.placement;
 
-            if (sizeChanged || scaleChanged) {
-                if (sizeChanged) {
-                    state.viewSize = event.size;
-                }
+            if (sizeChanged) {
+                state.viewSize = event.size;
+            }
+            if (scaleChanged) {
                 state.scale = event.scale;
-                state.viewChanged = true;
             }
             state.backgroundColor = event.backgroundColor;
+            state.placement = event.placement;
+
+            if (sizeChanged || scaleChanged || placementChanged) {
+                state.viewChanged = true;
+            }
         }
     }
 
     // Process mouse events.
 
-    for (const auto& event : mouseEvents) {
+    for (const auto& input : inputEvents) {
+        const auto mouse = SurfaceMouseEvent(input);
+        if (!mouse) continue;
+        const auto& event = *mouse;
         switch (event.type) {
             case MouseEventType::Scroll: {
                 if (!config.enableZoom) break;
@@ -123,15 +132,22 @@ Module::Surface::~Surface() {
     impl.reset();
 }
 
-const std::vector<SurfaceManifest>& Module::Surface::manifests() const {
+std::vector<SurfaceManifest> Module::Surface::manifests() const {
+    std::lock_guard<std::mutex> lock(impl->manifestMutex);
     return impl->manifests;
 }
 
-void Module::Surface::pushMouseEvent(const MouseEvent& event) {
-    impl->eventBuffer.pushMouse(event);
+SurfaceCursor Module::Surface::cursor() const {
+    return impl->cursor.load(std::memory_order_relaxed);
+}
+
+void Module::Surface::pushInputEvent(const InputEvent& event) {
+    std::lock_guard<std::mutex> lock(impl->eventMutex);
+    impl->eventBuffer.pushInput(event);
 }
 
 void Module::Surface::pushSurfaceEvent(const SurfaceEvent& event) {
+    std::lock_guard<std::mutex> lock(impl->eventMutex);
     impl->eventBuffer.pushSurface(event);
 }
 

@@ -812,7 +812,9 @@ void ImGui_ImplGlfw_Shutdown()
 
 static void ImGui_ImplGlfw_UpdateMouseData()
 {
+#if !defined(__APPLE__)
     ImGui_ImplGlfw_Data* bd = ImGui_ImplGlfw_GetBackendData();
+#endif
     ImGuiIO& io = ImGui::GetIO();
     ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
 
@@ -835,6 +837,10 @@ static void ImGui_ImplGlfw_UpdateMouseData()
             if (io.WantSetMousePos)
                 glfwSetCursorPos(window, (double)(mouse_pos_prev.x - viewport->Pos.x), (double)(mouse_pos_prev.y - viewport->Pos.y));
 
+            // UPDATE-ME: CyberEther modification; preserve or revalidate when updating ImGui.
+            // On macOS, polling reads the physical cursor and can overwrite positions from
+            // synthetic mouse events. Rely on ImGui_ImplGlfw_CursorPosCallback there instead.
+#if !defined(__APPLE__)
             // (Optional) Fallback to provide mouse position when focused (ImGui_ImplGlfw_CursorPosCallback already provides this when hovered or captured)
             if (bd->MouseWindow == nullptr)
             {
@@ -852,6 +858,7 @@ static void ImGui_ImplGlfw_UpdateMouseData()
                 bd->LastValidMousePos = ImVec2((float)mouse_x, (float)mouse_y);
                 io.AddMousePosEvent((float)mouse_x, (float)mouse_y);
             }
+#endif
         }
 
         // (Optional) When using multiple viewports: call io.AddMouseViewportEvent() with the viewport the OS mouse cursor is hovering.
@@ -1110,10 +1117,11 @@ void ImGui_ImplGlfw_InstallEmscriptenCallbacks(GLFWwindow*, const char* canvas_s
 // See https://github.com/pongasoft/emscripten-glfw/blob/master/docs/Usage.md#how-to-make-the-canvas-resizable-by-the-user for an explanation
 void ImGui_ImplGlfw_InstallEmscriptenCallbacks(GLFWwindow* window, const char* canvas_selector)
 {
-  GLFWwindow* w = (GLFWwindow*)(EM_ASM_INT({ return Module.glfwGetWindow(UTF8ToString($0)); }, canvas_selector));
+  // UPDATE-ME: Keep the lookup on browser main and resize the selected OffscreenCanvas.
+  GLFWwindow* w = (GLFWwindow*)(MAIN_THREAD_EM_ASM_INT({ return Module.glfwGetWindow(UTF8ToString($0)); }, canvas_selector));
   IM_ASSERT(window == w); // Sanity check
   IM_UNUSED(w);
-  emscripten_glfw_make_canvas_resizable(window, "window", nullptr);
+  emscripten_glfw_make_canvas_resizable(window, canvas_selector, nullptr);
 }
 #endif // #ifdef EMSCRIPTEN_USE_PORT_CONTRIB_GLFW3
 

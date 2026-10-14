@@ -3,11 +3,18 @@
 
 #include "../module_surface.hh"
 
+#include <atomic>
+#include <mutex>
+
 namespace Jetstream {
 
 struct Module::Surface::Impl {
     EventBuffer eventBuffer;
     std::vector<SurfaceManifest> manifests;
+    std::atomic<SurfaceCursor> cursor{SurfaceCursor::Default};
+
+    mutable std::mutex eventMutex;
+    mutable std::mutex manifestMutex;
 };
 
 }  // namespace Jetstream

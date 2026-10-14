@@ -7,7 +7,7 @@
 namespace Jetstream::Render {
 
 template<>
-class TextureImp<DeviceType::Metal> : public Texture {
+class JETSTREAM_API TextureImp<DeviceType::Metal> : public Texture {
  public:
     explicit TextureImp(const Config& config);
 
@@ -15,16 +15,13 @@ class TextureImp<DeviceType::Metal> : public Texture {
     Result destroy() override;
 
     using Render::Texture::size;
-    bool size(const Extent2D<U64>& size) override;
-
-    Result fill() override;
-    Result fillRow(const U64& y, const U64& height) override;
-
     uint64_t raw() const override {
         return texture ? (uint64_t)(void*)texture : 0;
     }
 
  protected:
+    Result underlyingDump(uint8_t* output) const override;
+
     constexpr MTL::PixelFormat getPixelFormat() const {
         return pixelFormat;
     }
@@ -39,7 +36,6 @@ class TextureImp<DeviceType::Metal> : public Texture {
 
     static MTL::PixelFormat ConvertPixelFormat(const PixelFormat&,
                                                const PixelType&);
-    static U64 GetPixelByteSize(const MTL::PixelFormat&);
 
  private:
     MTL::Texture* texture = nullptr;
@@ -48,6 +44,7 @@ class TextureImp<DeviceType::Metal> : public Texture {
 
     friend class SurfaceImp<DeviceType::Metal>;
     friend class ProgramImp<DeviceType::Metal>;
+    friend class TransferImp<DeviceType::Metal>;
 };
 
 }  // namespace Jetstream::Render

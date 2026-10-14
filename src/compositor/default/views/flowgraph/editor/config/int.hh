@@ -3,27 +3,19 @@
 
 #include "types.hh"
 
-// TODO: Cleanup parsing.
-
 namespace Jetstream {
 
-struct FlowgraphConfigIntField : public Sakura::Component {
+struct FlowgraphConfigIntField {
     using Config = FlowgraphConfigFieldConfig;
 
-    void update(Config config) {
+    Result update(Config config) {
         this->config = std::move(config);
         if (this->config.format != parsedFormat) {
-            const auto parts = Parser::SplitString(this->config.format, ":");
-            unit = (parts.size() > 1) ? parts[1] : "";
+            unit = Parser::Get<std::string>(this->config.format, "unit");
             parsedFormat = this->config.format;
         }
-        if (this->config.encoded != parsedEncoded) {
-            value = 0;
-            if (!this->config.encoded.empty()) {
-                Parser::StringToTyped(this->config.encoded, value);
-            }
-            parsedEncoded = this->config.encoded;
-        }
+        value = 0;
+        JST_CHECK(Parser::Deserialize(this->config.values, this->config.name, value));
         frame.update({
             .id = this->config.id,
             .label = this->config.label,
@@ -33,14 +25,15 @@ struct FlowgraphConfigIntField : public Sakura::Component {
             .id = this->config.id + "Input",
             .value = value,
             .unit = unit,
-            .onChange = [this](U64 nextValue) {
-                auto values = this->config.values;
-                values[this->config.name] = nextValue;
+            .onChange = [this](I64 nextValue) {
+                Parser::Map patch;
+                patch[this->config.name] = nextValue;
                 if (this->config.onApply) {
-                    this->config.onApply(std::move(values), false);
+                    this->config.onApply(std::move(patch), false);
                 }
             },
         });
+        return Result::SUCCESS;
     }
 
     void render(const Sakura::Context& ctx) const {
@@ -51,10 +44,9 @@ struct FlowgraphConfigIntField : public Sakura::Component {
 
  private:
     Config config;
-    std::string parsedFormat;
-    std::string parsedEncoded;
+    Parser::Map parsedFormat;
     std::string unit;
-    U64 value = 0;
+    I64 value = 0;
     Sakura::NodeField frame;
     Sakura::NodeIntInput input;
 };

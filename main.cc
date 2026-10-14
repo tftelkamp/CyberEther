@@ -1,32 +1,32 @@
 #include "jetstream/run.hh"
+#include "updater.hh"
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <cstdlib>
+#endif
 
 using namespace Jetstream;
-
-#if defined(JST_OS_LINUX)
-extern "C" void CyberEtherPluginCreate(Instance* instance) __attribute__((weak));
-extern "C" void CyberEtherPluginDestroy(Instance* instance) __attribute__((weak));
-#endif
 
 #if defined(JST_OS_BROWSER)
 extern "C" {
 EMSCRIPTEN_KEEPALIVE
 void cyberether_shutdown() {
-    (void)Stop();
+    RequestShutdown();
 }
 }
 #endif
 
-int main(int argc, char* argv[]) {
+namespace {
+
+int CyberEtherMain(int argc, char* argv[]) {
     try {
+        Updater::Initialize(argc, argv);
 #if defined(JST_OS_BROWSER)
-        (void)argc;
-        (void)argv;
-        return Run();
+        return Run(argc, argv);
 #endif
-#if defined(JST_OS_LINUX)
-        return Run(argc, argv, CyberEtherPluginCreate, CyberEtherPluginDestroy);
-#endif
-#if defined(JST_OS_WINDOWS) || defined(JST_OS_MAC)
+#if defined(JST_OS_LINUX) || defined(JST_OS_WINDOWS) || defined(JST_OS_MAC)
         return Run(argc, argv);
 #endif
     } catch (const Result& status) {
@@ -42,3 +42,23 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
+
+}
+
+#if defined(JST_OS_WINDOWS)
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+    return CyberEtherMain(__argc, __argv);
+}
+#elif defined(JST_OS_BROWSER)
+int main(int argc, char* argv[]) {
+    const int status = CyberEtherMain(argc, argv);
+    if (status != 0) {
+        emscripten_force_exit(status);
+    }
+    return status;
+}
+#else
+int main(int argc, char* argv[]) {
+    return CyberEtherMain(argc, argv);
+}
+#endif

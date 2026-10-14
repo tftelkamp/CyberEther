@@ -48,8 +48,39 @@ if jst_is_browser
     meson.override_dependency('threads', threads_dep)
 endif
 
+browser_exe_link_args = []
+browser_exe_link_depends = []
+if jst_is_browser
+    browser_exe_link_depends = files(
+        'src/platform/emscripten_sync_library.js',
+        'src/platform/emscripten_lifecycle_library.js',
+        'src/platform/emscripten_lifecycle_pre.js',
+        'src/platform/emscripten_lifecycle_wrapper.js',
+    )
+    browser_exe_link_args = meson.get_external_property('main_module_link_args') + [
+        '--js-library', meson.current_source_dir() / 'src/platform/emscripten_sync_library.js',
+        '--js-library', meson.current_source_dir() / 'src/platform/emscripten_lifecycle_library.js',
+        '--pre-js', meson.current_source_dir() / 'src/platform/emscripten_lifecycle_pre.js',
+        '--extern-pre-js', meson.current_source_dir() / 'src/platform/emscripten_lifecycle_wrapper.js',
+        '-sEXPORT_NAME=CyberEtherRuntime',
+        '-Wl,--whole-archive',
+    ]
+endif
+
 if jst_is_windows
-    add_project_arguments('/Zc:preprocessor', '/bigobj', language: 'cpp')
+    add_project_arguments(
+        '/Zc:preprocessor',
+        '/bigobj',
+        '/wd4251',
+        '/D_SILENCE_NONFLOATING_COMPLEX_DEPRECATION_WARNING',
+        language: 'cpp',
+    )
+endif
+
+cpp = meson.get_compiler('cpp')
+if cpp.has_argument('-Wno-missing-field-initializers')
+    # Config aggregates intentionally rely on defaults for unspecified fields.
+    add_project_arguments('-Wno-missing-field-initializers', language: 'cpp')
 endif
 
 if get_option('native')
@@ -94,8 +125,8 @@ cfg_lst.set('version_minor', version_parts[1])
 cfg_lst.set('version_patch', version_parts[2])
 cfg_lst.set('buildtype', get_option('buildtype'))
 cfg_lst.set('optimization', get_option('optimization'))
-cfg_lst.set('debug', get_option('debug'))
-cfg_lst.set('native', get_option('native'))
+cfg_lst.set('debug', get_option('debug') ? 'true' : 'false')
+cfg_lst.set('native', get_option('native') ? 'true' : 'false')
 
 cfg_lst.set('JST_IS_STATIC', jst_is_static)
 cfg_lst.set('JST_IS_SHARED', not jst_is_static)
@@ -137,11 +168,12 @@ if jst_is_browser or jst_is_static
         link_whole: libjetstream
     )
 else
-    libjetstream = library(
+    libjetstream = shared_library(
         'jetstream',
         src_lst,
+        cpp_args: ['-DJST_IS_LIBRARY'],
         include_directories: inc_lst,
-        dependencies: dep_lst,
+        dependencies: dep_lst + whole_dep_lst,
         install: true
     )
 
@@ -170,7 +202,9 @@ if not jst_is_static
     pkg = import('pkgconfig')
     pkg.generate(
         libjetstream,
-        libraries: dep_lst,
+        name: 'jetstream',
+        description: 'CyberEther',
+        version: meson.project_version(),
     )
 endif
 
@@ -181,31 +215,41 @@ endif
 if not jst_is_wheel and \
    not jst_is_ios and \
    not jst_is_android
-    if jst_is_browser or jst_is_static
-        cyberether_exe = executable(
-            'cyberether',
-            'main.cc',
-            include_directories: inc_lst,
-            dependencies: libjetstream_dep,
-            install: true,
+    cyberether_src_lst = ['main.cc']
+
+    if jst_is_windows
+        windows = import('windows')
+        cyberether_rc_conf = configuration_data()
+        cyberether_rc_conf.set('CYBERETHER_ICON', meson.current_source_dir() / 'apps/windows/cyberether.ico')
+        cyberether_rc = configure_file(
+            input: 'apps/windows/cyberether.rc.in',
+            output: 'cyberether.rc',
+            configuration: cyberether_rc_conf,
         )
-    else
-        cyberether_exe = executable(
-            'cyberether',
-            'main.cc',
-            include_directories: inc_lst,
-            dependencies: dep_lst,
-            link_with: libjetstream,
-            install: true,
-        )
+
+        cyberether_src_lst += windows.compile_resources(cyberether_rc)
     endif
+
+    cyberether_exe = executable(
+        'cyberether',
+        cyberether_src_lst,
+        include_directories: inc_lst,
+        dependencies: libjetstream_dep,
+        link_args: browser_exe_link_args,
+        link_depends: browser_exe_link_depends,
+        win_subsystem: 'windows',
+        install: true,
+    )
 endif
 
 #
 # Optional
 #
 
-if get_option('tests') and not jst_is_browser
+if get_option('tests') and \
+   not jst_is_browser and \
+   not jst_is_ios and \
+   not jst_is_android
     subdir('tests')
 endif
 

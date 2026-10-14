@@ -1,6 +1,7 @@
 #ifndef JETSTREAM_COMPOSITOR_IMPL_DEFAULT_VIEWS_FLOWGRAPH_METRICS_BASE_HH
 #define JETSTREAM_COMPOSITOR_IMPL_DEFAULT_VIEWS_FLOWGRAPH_METRICS_BASE_HH
 
+#include "error.hh"
 #include "label.hh"
 #include "progressbar.hh"
 #include "table.hh"
@@ -13,10 +14,9 @@
 
 namespace Jetstream {
 
-struct FlowgraphMetricInstance : public Sakura::Component {
+struct FlowgraphMetricInstance {
     void update(FlowgraphMetricConfig config) {
-        const auto parts = Parser::SplitString(config.format, ":");
-        kind = parts.empty() ? "" : parts[0];
+        kind = Parser::Get<std::string>(config.format, "type");
 
         if (kind == "progressbar") {
             progress.update(std::move(config));
@@ -33,7 +33,6 @@ struct FlowgraphMetricInstance : public Sakura::Component {
             unknownText.update({
                 .id = config.id + "Unsupported",
                 .str = "Unsupported metric: " + kind,
-                .tone = Sakura::Text::Tone::Warning,
             });
         }
     }
@@ -58,7 +57,7 @@ struct FlowgraphMetricInstance : public Sakura::Component {
     FlowgraphMetricLabel label;
     FlowgraphMetricTable table;
     Sakura::NodeField unknownFrame;
-    Sakura::NodeLabel unknownText;
+    FlowgraphMetricError unknownText;
 };
 
 }  // namespace Jetstream

@@ -5,33 +5,47 @@
 
 namespace Jetstream {
 
-struct FlowgraphConfigMultilineField : public Sakura::Component {
+struct FlowgraphConfigMultilineField {
     using Config = FlowgraphConfigFieldConfig;
 
-    void update(Config config) {
+    Result update(Config config) {
         this->config = std::move(config);
         if (this->config.format != parsedFormat) {
-            const auto parts = Parser::SplitString(this->config.format, ":");
-            collapsible = parts.size() > 1 && parts[1] == "collapsible";
+            collapsible = Parser::Get<bool>(this->config.format, "collapsible", false);
             parsedFormat = this->config.format;
+        }
+        std::string nextValue;
+        JST_CHECK(Parser::Deserialize(this->config.values, this->config.name, nextValue));
+        if (nextValue != parsedEncoded) {
+            buffer = nextValue;
+            parsedEncoded = nextValue;
         }
         frame.update({
             .id = this->config.id,
             .label = this->config.label,
             .help = this->config.help,
         });
+        const bool dirty = buffer != parsedEncoded;
         editor.update({
             .id = this->config.id + "Editor",
-            .value = this->config.encoded,
+            .value = buffer,
+            .status = dirty ? "Edited. Press Ctrl+Enter to apply." : this->config.status,
+            .statusTone = dirty ? Sakura::NodeCodeEditor::StatusTone::Info : this->config.statusTone,
             .collapsible = collapsible,
-            .onChange = [this](std::string value) {
-                auto values = this->config.values;
-                values[this->config.name] = std::move(value);
+            .backgroundColorKey = "card",
+            .onChange = [this](std::string nextValue) {
+                buffer = std::move(nextValue);
+            },
+            .onSubmit = [this](std::string nextValue) {
+                buffer = std::move(nextValue);
+                Parser::Map patch;
+                patch[this->config.name] = buffer;
                 if (this->config.onApply) {
-                    this->config.onApply(std::move(values), false);
+                    this->config.onApply(std::move(patch), false);
                 }
             },
         });
+        return Result::SUCCESS;
     }
 
     void render(const Sakura::Context& ctx) const {
@@ -42,7 +56,9 @@ struct FlowgraphConfigMultilineField : public Sakura::Component {
 
  private:
     Config config;
-    std::string parsedFormat;
+    Parser::Map parsedFormat;
+    std::string parsedEncoded;
+    std::string buffer;
     bool collapsible = false;
     Sakura::NodeField frame;
     Sakura::NodeCodeEditor editor;

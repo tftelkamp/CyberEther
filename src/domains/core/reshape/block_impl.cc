@@ -30,6 +30,7 @@ Result ReshapeImpl::validate() {
 Result ReshapeImpl::configure() {
     reshapeModuleConfig->shape = shape;
     duplicateModuleConfig->hostAccessible = true;
+    duplicateModuleConfig->outputDevice = GetDeviceName(device());
 
     return Result::SUCCESS;
 }
@@ -41,12 +42,12 @@ Result ReshapeImpl::define() {
     JST_CHECK(defineInterfaceConfig("shape",
                                     "Shape",
                                     "Target shape as bracket notation (e.g., [100, 200]).",
-                                    "text"));
+                                    {{"type", "text"}}));
 
     JST_CHECK(defineInterfaceConfig("contiguous",
                                     "Contiguous",
                                     "Copy data to ensure contiguous memory layout before reshaping.",
-                                    "bool"));
+                                    {{"type", "bool"}}));
 
     return Result::SUCCESS;
 }
@@ -70,6 +71,8 @@ Result ReshapeImpl::create() {
     return Result::SUCCESS;
 }
 
-JST_REGISTER_BLOCK(ReshapeImpl);
+JST_REGISTER_BLOCK(ReshapeImpl,
+                   {"reshape"},
+                   {"duplicate", true});
 
 }  // namespace Jetstream::Blocks

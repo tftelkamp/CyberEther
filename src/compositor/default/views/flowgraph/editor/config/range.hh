@@ -4,32 +4,20 @@
 #include "types.hh"
 
 #include <cmath>
-
-// TODO: Cleanup parsing.
+#include <limits>
 
 namespace Jetstream {
 
-struct FlowgraphConfigRangeField : public Sakura::Component {
+struct FlowgraphConfigRangeField {
     using Config = FlowgraphConfigFieldConfig;
 
-    void update(Config config) {
+    Result update(Config config) {
         this->config = std::move(config);
         if (this->config.format != parsedFormat) {
             parseFormat();
         }
-        if (this->config.encoded != parsedEncoded) {
-            value = minValue;
-            if (!this->config.encoded.empty()) {
-                if (integer) {
-                    U64 intValue = 0;
-                    Parser::StringToTyped(this->config.encoded, intValue);
-                    value = static_cast<F32>(intValue);
-                } else {
-                    Parser::StringToTyped(this->config.encoded, value);
-                }
-            }
-            parsedEncoded = this->config.encoded;
-        }
+        value = minValue;
+        JST_CHECK(Parser::Deserialize(this->config.values, this->config.name, value));
         frame.update({
             .id = this->config.id,
             .label = this->config.label,
@@ -40,20 +28,37 @@ struct FlowgraphConfigRangeField : public Sakura::Component {
             .min = minValue,
             .max = maxValue,
             .value = value,
-            .integer = integer,
+            .integer = unsignedInteger,
             .unit = unit,
             .onChange = [this](F32 nextValue) {
-                auto values = this->config.values;
-                if (integer) {
-                    values[this->config.name] = static_cast<U64>(std::round(nextValue));
+                const F32 unsignedLimit = std::ldexp(1.0f, std::numeric_limits<U64>::digits);
+                if (!std::isfinite(nextValue) ||
+                    (unsignedInteger &&
+                     (nextValue < 0.0f || std::round(nextValue) >= unsignedLimit))) {
+                    if (this->config.onError) {
+                        this->config.onError(
+                            Result::ERROR,
+                            jst::fmt::format("{}: {}",
+                                             this->config.label,
+                                             unsignedInteger
+                                                 ? "Value must be finite, non-negative, and fit in an unsigned 64-bit integer."
+                                                 : "Value must be finite."));
+                    }
+                    return;
+                }
+
+                Parser::Map patch;
+                if (unsignedInteger) {
+                    patch[this->config.name] = static_cast<U64>(std::round(nextValue));
                 } else {
-                    values[this->config.name] = nextValue;
+                    patch[this->config.name] = nextValue;
                 }
                 if (this->config.onApply) {
-                    this->config.onApply(std::move(values), true);
+                    this->config.onApply(std::move(patch), true);
                 }
             },
         });
+        return Result::SUCCESS;
     }
 
     void render(const Sakura::Context& ctx) const {
@@ -65,27 +70,19 @@ struct FlowgraphConfigRangeField : public Sakura::Component {
  private:
     void parseFormat() {
         parsedFormat = config.format;
-        const auto parts = Parser::SplitString(config.format, ":");
-        unit = (parts.size() > 3) ? parts[3] : "";
-        const std::string type = (parts.size() > 4) ? parts[4] : "";
-        integer = type == "int";
-        if (integer) {
-            minValue = static_cast<F32>((parts.size() > 1 && !parts[1].empty()) ? std::stoull(parts[1]) : 0);
-            maxValue = static_cast<F32>((parts.size() > 2 && !parts[2].empty()) ? std::stoull(parts[2]) : 100);
-        } else {
-            minValue = (parts.size() > 1 && !parts[1].empty()) ? std::stof(parts[1]) : 0.0f;
-            maxValue = (parts.size() > 2 && !parts[2].empty()) ? std::stof(parts[2]) : 1.0f;
-        }
+        unit = Parser::Get<std::string>(config.format, "unit");
+        unsignedInteger = Parser::Get<std::string>(config.format, "value_type", "float") == "uint";
+        minValue = Parser::Get<F32>(config.format, "min", 0.0f);
+        maxValue = Parser::Get<F32>(config.format, "max", unsignedInteger ? 100.0f : 1.0f);
     }
 
     Config config;
-    std::string parsedFormat;
-    std::string parsedEncoded;
+    Parser::Map parsedFormat;
     std::string unit;
     F32 minValue = 0.0f;
     F32 maxValue = 1.0f;
     F32 value = 0.0f;
-    bool integer = false;
+    bool unsignedInteger = false;
     Sakura::NodeField frame;
     Sakura::NodeRangeInput input;
 };

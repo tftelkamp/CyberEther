@@ -50,16 +50,16 @@ Result Scheduler::reload(const std::shared_ptr<Module>& module) {
     return impl->reload(module);
 }
 
-Result Scheduler::present() {
-    return impl->present();
+Result Scheduler::synchronize(const std::function<Result()>& fn) {
+    return impl->synchronize(fn);
 }
 
-Result Scheduler::compute() {
-    return impl->compute();
+Result Scheduler::present(std::unordered_set<std::string>& failedModules) {
+    return impl->present(failedModules);
 }
 
-const std::unordered_map<std::string, std::shared_ptr<Runtime::Metrics>>& Scheduler::metrics() const {
-    return impl->metrics();
+Result Scheduler::compute(std::unordered_set<std::string>& failedModules) {
+    return impl->compute(failedModules);
 }
 
 const char* GetSchedulerName(const SchedulerType& scheduler) {

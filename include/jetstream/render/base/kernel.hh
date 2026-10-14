@@ -1,6 +1,7 @@
 #ifndef JETSTREAM_RENDER_BASE_KERNEL_HH
 #define JETSTREAM_RENDER_BASE_KERNEL_HH
 
+#include <atomic>
 #include <utility>
 #include <memory>
 #include <vector>
@@ -15,7 +16,7 @@
 
 namespace Jetstream::Render {
 
-class Kernel {
+class JETSTREAM_API Kernel {
  public:
     enum class AccessMode : U8 {
         WRITE = 1 << 0,
@@ -26,6 +27,7 @@ class Kernel {
         std::tuple<U64, U64, U64> gridSize;
         std::vector<std::pair<std::shared_ptr<Buffer>, AccessMode>> buffers;
         std::unordered_map<DeviceType, std::vector<std::vector<U8>>> kernels;
+        U32 workgroupSize = 1;
     };
 
     explicit Kernel(const Config& config) : config(config) {}
@@ -35,9 +37,7 @@ class Kernel {
         return config;
     }
 
-    void update() {
-        updated = true;
-    }
+    void update();
 
     template<DeviceType D> 
     static std::shared_ptr<Kernel> Factory(const Config& config) {
@@ -45,8 +45,20 @@ class Kernel {
     }
 
  protected:
+    bool shouldEncode() const;
+    void markScheduled();
+    void commitFrame();
+
     Config config;
-    bool updated;
+
+ private:
+    void prepareForFrame();
+
+    std::atomic_bool updateRequested = false;
+    bool updatePrepared = false;
+    bool updateScheduled = false;
+
+    friend class Surface;
 };
 
 static constexpr Kernel::AccessMode operator&(Kernel::AccessMode lhs, Kernel::AccessMode rhs) {

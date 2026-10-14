@@ -9,15 +9,14 @@
 
 namespace Jetstream {
 
-struct Runtime::Impl {
+struct JETSTREAM_API Runtime::Impl {
  public:
     virtual Result create(const Modules& modules) = 0;
     virtual Result destroy() = 0;
 
     virtual Result compute(const std::vector<std::string>& modules,
-                           std::unordered_set<std::string>& skippedModules) = 0;
-
-    virtual const std::shared_ptr<Metrics>& metrics() const = 0;
+                           std::unordered_set<std::string>& skippedModules,
+                           std::unordered_set<std::string>& failedModules) = 0;
 
  protected:
     std::string name;

@@ -17,7 +17,7 @@
 
 namespace Jetstream::Render {
 
-class Program {
+class JETSTREAM_API Program {
  public:
     enum class Target : U8 {
         VERTEX   = 1 << 0,
@@ -40,6 +40,14 @@ class Program {
         return config;
     }
 
+    bool enabled() const {
+        return enabledState;
+    }
+
+    void setEnabled(bool enabled) {
+        enabledState = enabled;
+    }
+
     void scissorRect(const std::optional<ScissorRect>& rect) {
         config.scissorRect = rect;
     }
@@ -53,6 +61,9 @@ class Program {
     Config config;
 
     uint32_t drawIndex = 0;
+
+ private:
+    bool enabledState = true;
 };
 
 inline constexpr Program::Target operator|(Program::Target lhs, Program::Target rhs) {

@@ -11,6 +11,7 @@
 namespace Jetstream::Platform {
 
 Result OpenUrl(const std::string& url);
+Result OpenFolder(const std::string& path);
 Result ConfigPath(std::string& path);
 Result CachePath(std::string& path);
 Result PickFile(std::string& path,
@@ -19,6 +20,7 @@ Result PickFile(std::string& path,
 Result PickFolder(std::string& path,
                   std::function<void(std::string)> callback);
 Result SaveFile(std::string& path,
+                const std::vector<std::string>& extensions,
                 std::function<void(std::string)> callback);
 
 }  // namespace Jetstream::Platform

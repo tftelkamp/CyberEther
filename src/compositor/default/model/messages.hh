@@ -7,7 +7,7 @@
 #include "jetstream/instance_remote.hh"
 #include "jetstream/module_surface.hh"
 #include "jetstream/parser.hh"
-#include "jetstream/render/sakura/toast.hh"
+#include "jetstream/render/sakura/base.hh"
 #include "jetstream/types.hh"
 
 #include <deque>
@@ -38,8 +38,16 @@ struct MailOpenFlowgraphPath {
     std::string path;
 };
 
+struct MailDropFlowgraphPath {
+    std::string path;
+};
+
 struct MailOpenFlowgraphBlob {
     std::vector<char> blob;
+};
+
+struct MailFocusFlowgraph {
+    std::string flowgraph;
 };
 
 struct MailApplyTheme {
@@ -103,6 +111,22 @@ struct MailSetBackgroundParticles {
     bool value = false;
 };
 
+struct MailSetFlowgraphMetadataVisible {
+    bool value = false;
+};
+
+struct MailSetFlowgraphMetadataSearch {
+    std::string value;
+};
+
+struct MailSetFlowgraphEnvironmentVisible {
+    bool value = false;
+};
+
+struct MailSetFlowgraphEnvironmentSearch {
+    std::string value;
+};
+
 struct MailSetGraphicsScale {
     F32 value = 1.0f;
 };
@@ -119,7 +143,7 @@ struct MailSetDebugLatencyEnabled {
     bool value = false;
 };
 
-struct MailSetDebugRuntimeMetricsEnabled {
+struct MailSetDebugTimingEnabled {
     bool value = false;
 };
 
@@ -128,6 +152,10 @@ struct MailSetDebugLogLevel {
 };
 
 struct MailCheckForUpdates {};
+
+struct MailDownloadUpdate {};
+
+struct MailApplyUpdate {};
 
 struct MailDismissUpdate {};
 
@@ -151,6 +179,20 @@ struct MailSetRemoteAutoJoinSessions {
     bool value = false;
 };
 
+struct MailSetPythonRuntimePath {
+    std::string value;
+};
+
+struct MailSetRuntimeDependencyPolicy {
+    std::string value;
+};
+
+struct MailOpenPythonEnvironmentCache {};
+
+struct MailInstallPythonDependencies {
+    U64 generation = 0;
+};
+
 struct MailSaveFlowgraphPath {
     std::string flowgraph;
     std::string path;
@@ -163,9 +205,42 @@ struct MailBrowseConfigPath {
     std::function<void(std::string)> onSelect;
 };
 
+struct MailFilePickerNavigate {
+    U64 generation = 0;
+    std::string path;
+};
+
+struct MailFilePickerSelect {
+    U64 generation = 0;
+    std::string path;
+};
+
+struct MailFilePickerSetFilename {
+    U64 generation = 0;
+    std::string value;
+};
+
+struct MailFilePickerConfirm {
+    U64 generation = 0;
+};
+
+struct MailFilePickerCancel {
+    U64 generation = 0;
+};
+
 struct MailRunBenchmark {};
 
 struct MailResetBenchmark {};
+
+struct MailSetBenchmarkModule {
+    std::string moduleType;
+};
+
+struct MailSetFeedbackText {
+    std::string value;
+};
+
+struct MailSubmitFeedback {};
 
 struct MailSetFlowgraphInfo {
     std::string flowgraph;
@@ -189,6 +264,11 @@ struct MailRenameBlock {
     std::string flowgraph;
     std::string oldId;
     std::string newId;
+};
+
+struct MailOpenRenameBlock {
+    std::string flowgraph;
+    std::string blockId;
 };
 
 struct MailDeleteBlock {
@@ -244,6 +324,19 @@ struct MailSetNodeMeta {
     std::string flowgraph;
     std::string block;
     NodeMeta meta;
+    std::optional<NodeMeta> base;
+};
+
+struct MailSetConfigCollapsed {
+    std::string flowgraph;
+    std::string block;
+    bool collapsed = false;
+};
+
+struct MailSetConfigDetached {
+    std::string flowgraph;
+    std::string block;
+    bool detached = false;
 };
 
 struct MailCreateStack {
@@ -270,11 +363,29 @@ struct MailSetStackLayout {
     std::optional<StackDockLayoutMeta> layout;
 };
 
+struct MailRemoveStackBlock {
+    std::string flowgraph;
+    std::string block;
+};
+
+struct MailRenameStackBlock {
+    std::string flowgraph;
+    std::string oldId;
+    std::string newId;
+};
+
 struct MailSetSurfaceDetached {
     std::string flowgraph;
     std::string block;
     std::string surface;
     bool detached = false;
+};
+
+struct MailSetSurfaceConfigCollapsed {
+    std::string flowgraph;
+    std::string block;
+    std::string surface;
+    bool collapsed = true;
 };
 
 struct MailStartRemote {
@@ -287,9 +398,9 @@ struct MailApproveRemoteClient {
     std::string code;
 };
 
-struct MailSurfaceMouse {
+struct MailSurfaceInput {
     std::shared_ptr<Module::Surface> surface;
-    MouseEvent event;
+    InputEvent event;
 };
 
 enum class SurfacePlacement {
@@ -318,7 +429,9 @@ using Mail = std::variant<MailNewFlowgraph,
                           MailCloseFlowgraph,
                           MailSaveFlowgraph,
                           MailOpenFlowgraphPath,
+                          MailDropFlowgraphPath,
                           MailOpenFlowgraphBlob,
+                          MailFocusFlowgraph,
                           MailApplyTheme,
                           MailOpenModal,
                           MailSetSettingsSection,
@@ -334,24 +447,43 @@ using Mail = std::variant<MailNewFlowgraph,
                           MailQuit,
                           MailSetInfoPanelEnabled,
                           MailSetBackgroundParticles,
+                          MailSetFlowgraphMetadataVisible,
+                          MailSetFlowgraphMetadataSearch,
+                          MailSetFlowgraphEnvironmentVisible,
+                          MailSetFlowgraphEnvironmentSearch,
                           MailSetGraphicsScale,
                           MailSetGraphicsDevice,
                           MailSetGraphicsFramerate,
                           MailSetDebugLatencyEnabled,
-                          MailSetDebugRuntimeMetricsEnabled,
+                          MailSetDebugTimingEnabled,
                           MailSetDebugLogLevel,
                           MailCheckForUpdates,
+                          MailDownloadUpdate,
+                          MailApplyUpdate,
                           MailDismissUpdate,
                           MailSetRemoteBrokerUrl,
                           MailSetRemoteCodec,
                           MailSetRemoteFramerate,
                           MailSetRemoteEncoder,
                           MailSetRemoteAutoJoinSessions,
+                          MailSetPythonRuntimePath,
+                          MailSetRuntimeDependencyPolicy,
+                          MailOpenPythonEnvironmentCache,
+                          MailInstallPythonDependencies,
                           MailSaveFlowgraphPath,
                           MailBrowseConfigPath,
+                          MailFilePickerNavigate,
+                          MailFilePickerSelect,
+                          MailFilePickerSetFilename,
+                          MailFilePickerConfirm,
+                          MailFilePickerCancel,
                           MailRunBenchmark,
                           MailResetBenchmark,
+                          MailSetBenchmarkModule,
+                          MailSetFeedbackText,
+                          MailSubmitFeedback,
                           MailSetFlowgraphInfo,
+                          MailOpenRenameBlock,
                           MailRenameBlock,
                           MailDeleteBlock,
                           MailReloadBlock,
@@ -362,15 +494,20 @@ using Mail = std::variant<MailNewFlowgraph,
                           MailCopyBlock,
                           MailPasteBlock,
                           MailSetNodeMeta,
+                          MailSetConfigCollapsed,
+                          MailSetConfigDetached,
                           MailCreateStack,
                           MailDeleteStack,
                           MailSetStackGeometry,
                           MailSetStackLayout,
+                          MailRemoveStackBlock,
+                          MailRenameStackBlock,
                           MailSetSurfaceDetached,
+                          MailSetSurfaceConfigCollapsed,
                           MailStartRemote,
                           MailStopRemote,
                           MailApproveRemoteClient,
-                          MailSurfaceMouse,
+                          MailSurfaceInput,
                           MailResizeSurface>;
 
 }  // namespace Jetstream

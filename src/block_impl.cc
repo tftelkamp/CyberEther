@@ -1,7 +1,10 @@
 #include <jetstream/block.hh>
 #include <jetstream/detail/block_impl.hh>
+#include <jetstream/detail/block_context_impl.hh>
+#include <jetstream/module_context.hh>
 #include <jetstream/module_surface.hh>
 #include <jetstream/detail/block_interface_impl.hh>
+#include <jetstream/detail/module_impl.hh>
 
 namespace Jetstream {
 
@@ -22,6 +25,10 @@ Result Block::Impl::create() {
 }
 
 Result Block::Impl::destroy() {
+    return Result::SUCCESS;
+}
+
+Result Block::Impl::reconfigure() {
     return Result::SUCCESS;
 }
 
@@ -46,10 +53,10 @@ Result Block::Impl::moduleCreate(const std::string name,
                                     _device,
                                     _runtime,
                                     _provider,
-                                    module));
-    _modules[name] = {module, config};
-    _moduleOrder.push_back(name);
-
+                                    module,
+                                    _context->impl->environment,
+                                    _context->impl->view));
+    module->impl->_configChangesPending = _configChangesPending;
     // Clone input tensors to give each module an independent layout.
 
     TensorMap clonedInputs;
@@ -61,11 +68,36 @@ Result Block::Impl::moduleCreate(const std::string name,
     // Create module.
 
     const auto& blockModuleName = jst::fmt::format("{}-{}", _name, name);
-    JST_CHECK(module->create(blockModuleName, *config, clonedInputs, _render));
+    const auto createResult = module->create(blockModuleName, *config, clonedInputs, render());
+    if (createResult != Result::SUCCESS && createResult != Result::RELOAD) {
+        if (createResult == Result::INCOMPLETE) {
+            _modules[name] = {module, config, false};
+            _moduleOrder.push_back(name);
+            return createResult;
+        }
+
+        if (createResult != Result::ERROR) {
+            const auto destroyResult = module->destroy();
+            if (destroyResult != Result::SUCCESS && destroyResult != Result::RELOAD) {
+                JST_ERROR("[BLOCK] Failed to clean up module '{}' inside block '{}'.", name, _name);
+            }
+        }
+        return createResult;
+    }
 
     // Add module to scheduler.
 
-    JST_CHECK(_scheduler->add(module));
+    const auto addResult = scheduler()->add(module);
+    if (addResult != Result::SUCCESS && addResult != Result::RELOAD) {
+        const auto destroyResult = module->destroy();
+        if (destroyResult != Result::SUCCESS && destroyResult != Result::RELOAD) {
+            JST_ERROR("[BLOCK] Failed to clean up module '{}' after scheduler add failure inside block '{}'.", name, _name);
+        }
+        return addResult;
+    }
+
+    _modules[name] = {module, config};
+    _moduleOrder.push_back(name);
 
     // Cache surface providers.
 
@@ -76,7 +108,7 @@ Result Block::Impl::moduleCreate(const std::string name,
     return Result::SUCCESS;
 };
 
-Result Block::Impl::moduleDestroy(const std::string name) {
+Result Block::Impl::moduleDestroy(const std::string name, bool retainOnFailure) {
     JST_DEBUG("[BLOCK] Destroying module '{}' inside block '{}'.", name, _name);
 
     // Check if module exists.
@@ -92,25 +124,42 @@ Result Block::Impl::moduleDestroy(const std::string name) {
         JST_ERROR("[BLOCK] Module '{}' must be destroyed in reverse creation order.", name);
         return Result::ERROR;
     }
-    _moduleOrder.pop_back();
-
-    // Get module and remove from list.
-
-    auto entry = std::move(_modules[name]);
-    _modules.erase(name);
+    const auto module = _modules.at(name).module;
+    const auto surface = module->surface();
+    const auto releaseOwnership = [&]() {
+        // Permanent detachment closes the edit channel even if teardown failed.
+        module->impl->invalidateConfigChanges();
+        _surfaces.erase(std::remove(_surfaces.begin(), _surfaces.end(), surface),
+                        _surfaces.end());
+        _moduleOrder.pop_back();
+        _modules.erase(name);
+    };
 
     // Remove module from scheduler.
 
-    JST_CHECK(_scheduler->remove(entry.module));
-
-    // Remove from surface providers cache.
-
-    _surfaces.erase(std::remove(_surfaces.begin(), _surfaces.end(), entry.module->surface()),
-                    _surfaces.end());
+    const bool wasScheduled = _modules.at(name).scheduled;
+    if (wasScheduled) {
+        _modules.at(name).scheduled = false;
+        const auto removeResult = scheduler()->remove(module);
+        if (removeResult != Result::SUCCESS && removeResult != Result::RELOAD) {
+            if (!retainOnFailure) {
+                releaseOwnership();
+            }
+            return removeResult;
+        }
+    }
 
     // Destroy module.
 
-    JST_CHECK(entry.module->destroy());
+    const auto destroyResult = module->destroy();
+    if (destroyResult != Result::SUCCESS && destroyResult != Result::RELOAD) {
+        if (!retainOnFailure) {
+            releaseOwnership();
+        }
+        return destroyResult;
+    }
+
+    releaseOwnership();
 
     return Result::SUCCESS;
 }
@@ -138,6 +187,35 @@ std::shared_ptr<Module> Block::Impl::moduleHandle(const std::string& name) {
         return nullptr;
     }
     return _modules.at(name).module;
+}
+
+Result Block::Impl::moduleBindConfigEdit(const std::string& module,
+                                        const std::string& moduleKey,
+                                        const std::string& blockKey) {
+    if (!_modules.contains(module)) {
+        JST_ERROR("[BLOCK] Cannot bind edits for missing module '{}'.", module);
+        return Result::ERROR;
+    }
+
+    Parser::Map moduleConfig;
+    Parser::Map blockConfig;
+    JST_CHECK(_modules.at(module).config->serialize(moduleConfig));
+    JST_CHECK(_stagedConfig->serialize(blockConfig));
+    if (!moduleConfig.contains(moduleKey) || !blockConfig.contains(blockKey)) {
+        JST_ERROR("[BLOCK] Invalid configuration edit binding '{}.{}' -> '{}.{}'.",
+                  module, moduleKey, _name, blockKey);
+        return Result::ERROR;
+    }
+
+    auto& impl = *_modules.at(module).module->impl;
+    std::lock_guard lock(impl._configChangeMutex);
+    if (impl._configChangeBindings.contains(moduleKey)) {
+        JST_ERROR("[BLOCK] Configuration edit '{}.{}' is already bound.",
+                  module, moduleKey);
+        return Result::ERROR;
+    }
+    impl._configChangeBindings[moduleKey] = blockKey;
+    return Result::SUCCESS;
 }
 
 Result Block::Impl::moduleExposeOutput(const std::string blockPort,
@@ -223,16 +301,32 @@ const ProviderType& Block::Impl::provider() const {
     return _provider;
 }
 
-std::shared_ptr<Instance>& Block::Impl::instance() {
-    return _instance;
+const std::shared_ptr<Instance>& Block::Impl::instance() {
+    return _context->instance();
 }
 
-std::shared_ptr<Render::Window>& Block::Impl::render() {
-    return _render;
+const std::shared_ptr<Render::Window>& Block::Impl::render() {
+    return _context->render();
 }
 
-std::shared_ptr<Scheduler>& Block::Impl::scheduler() {
-    return _scheduler;
+const std::shared_ptr<Scheduler>& Block::Impl::scheduler() {
+    return _context->scheduler();
+}
+
+const std::shared_ptr<Flowgraph::Environment>& Block::Impl::environment() {
+    return _context->environment();
+}
+
+const std::shared_ptr<Flowgraph::Environment>& Block::Impl::environment() const {
+    return _context->environment();
+}
+
+const std::shared_ptr<Flowgraph::View>& Block::Impl::view() {
+    return _context->view();
+}
+
+const std::shared_ptr<Flowgraph::View>& Block::Impl::view() const {
+    return _context->view();
 }
 
 const std::vector<std::shared_ptr<Module::Surface>>& Block::Impl::surfaces() const {
@@ -252,7 +346,7 @@ Result Block::Impl::defineInterfaceInput(const std::string& key,
             return Result::ERROR;
         }
     }
-    _interface->impl->inputs.push_back({key, {label, "", help, {}}});
+    _interface->impl->inputs.push_back({key, {label, {}, help, {}}});
     return Result::SUCCESS;
 }
 
@@ -265,14 +359,15 @@ Result Block::Impl::defineInterfaceOutput(const std::string& key,
             return Result::ERROR;
         }
     }
-    _interface->impl->outputs.push_back({key, {label, "", help, {}}});
+    _interface->impl->outputs.push_back({key, {label, {}, help, {}}});
     return Result::SUCCESS;
 }
 
 Result Block::Impl::defineInterfaceConfig(const std::string& key,
                                           const std::string& label,
                                           const std::string& help,
-                                          const std::string& format) {
+                                          const Parser::Map& format) {
+    JST_CHECK(Interface::ValidateFormat(format));
     for (const auto& config : _interface->impl->configs) {
         if (config.first == key) {
             JST_ERROR("[BLOCK] Config '{}' already exists", key);
@@ -283,11 +378,25 @@ Result Block::Impl::defineInterfaceConfig(const std::string& key,
     return Result::SUCCESS;
 }
 
+Result Block::Impl::updateInterfaceConfigFormat(const std::string& key,
+                                                const Parser::Map& format) {
+    JST_CHECK(Interface::ValidateFormat(format));
+    for (auto& [configKey, entry] : _interface->impl->configs) {
+        if (configKey == key) {
+            entry.format = format;
+            return Result::SUCCESS;
+        }
+    }
+    JST_ERROR("[BLOCK] Config '{}' doesn't exist", key);
+    return Result::ERROR;
+}
+
 Result Block::Impl::defineInterfaceMetric(const std::string& key,
                                           const std::string& label,
                                           const std::string& help,
-                                          const std::string& format,
+                                          const Parser::Map& format,
                                           std::function<std::any()> metric) {
+    JST_CHECK(Interface::ValidateFormat(format, true));
     for (const auto& m : _interface->impl->metrics) {
         if (m.first == key) {
             JST_ERROR("[BLOCK] Metric '{}' already exists", key);
@@ -295,6 +404,21 @@ Result Block::Impl::defineInterfaceMetric(const std::string& key,
         }
     }
     _interface->impl->metrics.push_back({key, {label, format, help, std::move(metric)}});
+    return Result::SUCCESS;
+}
+
+Result Block::Impl::defineModuleTiming() {
+    for (const auto& name : _moduleOrder) {
+        const auto& module = _modules.at(name).module;
+        JST_CHECK(defineInterfaceMetric("runtime:" + name,
+                                        name,
+                                        "Runtime timing collected by the scheduler.",
+                                        {{"type", "timing"}, {"visibility", "internal"}},
+                                        [module]() -> std::any {
+            return module->timing();
+        }));
+    }
+
     return Result::SUCCESS;
 }
 

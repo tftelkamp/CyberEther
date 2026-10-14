@@ -7,14 +7,15 @@
 namespace Jetstream::Render {
 
 template<>
-class ProgramImp<DeviceType::WebGPU> : public Program {
+class JETSTREAM_API ProgramImp<DeviceType::WebGPU> : public Program {
  public:
     explicit ProgramImp(const Config& config);
 
  protected:
     Result create(const WGPUTextureFormat& pixelFormat);
     Result destroy();
-    Result draw(WGPURenderPassEncoder& renderPassEncoder);
+    Result draw(WGPURenderPassEncoder& renderPassEncoder,
+                const Extent2D<U64>& framebufferSize);
 
  private:
     WGPURenderPipeline pipeline;

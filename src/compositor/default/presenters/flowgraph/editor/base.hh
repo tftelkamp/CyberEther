@@ -12,6 +12,7 @@
 
 #include "jetstream/block.hh"
 #include "jetstream/flowgraph.hh"
+#include "jetstream/flowgraph_view.hh"
 
 #include <functional>
 #include <memory>
@@ -27,8 +28,8 @@ struct FlowgraphEditorPresenter {
     FlowgraphCatalogPresenter catalog;
     FlowgraphNodePresenter node;
 
-    explicit FlowgraphEditorPresenter(const PresenterContext& context) : context(context),
-                                                                          node(context) {}
+    explicit FlowgraphEditorPresenter(const PresenterContext& context)
+        : context(context), node(context) {}
 
     FlowgraphEditor::Config build(const std::string& flowgraphId,
                                   const std::shared_ptr<Flowgraph>& flowgraph) const {
@@ -36,26 +37,34 @@ struct FlowgraphEditorPresenter {
         FlowgraphEditor::Config config{
             .id = flowgraphId,
             .clipboardHasData = context.state.clipboard.hasData,
-            .debugRuntimeMetricsEnabled = context.state.debug.runtimeMetricsEnabled,
-            .blockOptions = catalog.buildBlockCatalog(),
+            .debugTimingEnabled = context.state.debug.timingEnabled,
+            .onBuildBlockOptions = [catalog = catalog]() {
+                return catalog.buildBlockCatalog();
+            },
             .title = flowgraph->title(),
             .summary = flowgraph->summary(),
             .author = flowgraph->author(),
             .license = flowgraph->license(),
             .description = flowgraph->description(),
             .path = flowgraph->path(),
-            .onCreateBlock = [enqueue, flowgraphId](const std::string& moduleId,
-                                                    std::optional<Extent2D<F32>> gridPosition,
-                                                    DeviceType device,
-                                                    RuntimeType runtime,
-                                                    ProviderType provider) {
-                enqueue(MailCreateBlock{flowgraphId, moduleId, gridPosition, device, runtime, provider});
+            .onCreateBlock =
+                [enqueue, flowgraphId](const std::string& moduleId,
+                                       std::optional<Extent2D<F32>> gridPosition,
+                                       DeviceType device,
+                                       RuntimeType runtime,
+                                       ProviderType provider) {
+                    enqueue(MailCreateBlock{flowgraphId, moduleId, gridPosition,
+                                            device, runtime, provider});
             },
             .onCopyBlock = [enqueue, flowgraphId](const std::string& blockName) {
                 enqueue(MailCopyBlock{flowgraphId, blockName});
             },
-            .onPasteBlock = [enqueue, flowgraphId](std::optional<Extent2D<F32>> gridPosition) {
-                enqueue(MailPasteBlock{flowgraphId, gridPosition});
+            .onPasteBlock =
+                [enqueue, flowgraphId](std::optional<Extent2D<F32>> gridPosition) {
+                    enqueue(MailPasteBlock{flowgraphId, gridPosition});
+            },
+            .onRenameBlock = [enqueue, flowgraphId](const std::string& blockName) {
+                enqueue(MailOpenRenameBlock{flowgraphId, blockName});
             },
             .onReloadBlock = [enqueue, flowgraphId](const std::string& blockName) {
                 enqueue(MailReloadBlock{flowgraphId, blockName});
@@ -67,13 +76,15 @@ struct FlowgraphEditorPresenter {
                                                           DeviceType device,
                                                           RuntimeType runtime,
                                                           ProviderType provider) {
-                enqueue(MailChangeBlockDevice{flowgraphId, blockName, device, runtime, provider});
+                enqueue(MailChangeBlockDevice{flowgraphId, blockName, device,
+                                              runtime, provider});
             },
             .onConnectBlock = [enqueue, flowgraphId](const std::string& blockName,
                                                      const std::string& inputPort,
                                                      const std::string& sourceBlock,
                                                      const std::string& sourcePort) {
-                enqueue(MailConnectBlock{flowgraphId, blockName, inputPort, sourceBlock, sourcePort});
+                enqueue(MailConnectBlock{flowgraphId, blockName, inputPort,
+                                         sourceBlock, sourcePort});
             },
             .onDisconnectBlock = [enqueue, flowgraphId](const std::string& blockName,
                                                         const std::string& inputPort) {
@@ -82,10 +93,12 @@ struct FlowgraphEditorPresenter {
             .onReconfigureBlock = [enqueue, flowgraphId](const std::string& blockName,
                                                          Parser::Map blockConfig,
                                                          const bool silent) {
-                enqueue(MailReconfigureBlock{flowgraphId, blockName, std::move(blockConfig), silent});
+                enqueue(MailReconfigureBlock{flowgraphId, blockName,
+                                             std::move(blockConfig), silent});
             },
-            .onConfigError = [enqueue](const Result result, const std::string& message) {
-                enqueue(MailNotifyResult{.result = result, .message = message});
+            .onConfigError =
+                [enqueue](const Result result, const std::string& message) {
+                    enqueue(MailNotifyResult{.result = result, .message = message});
             },
             .onBrowseConfigPath = [enqueue](bool save,
                                             std::vector<std::string> extensions,
@@ -101,18 +114,42 @@ struct FlowgraphEditorPresenter {
                                                    F32 x,
                                                    F32 y,
                                                    F32 width,
-                                                   F32 height) {
-                enqueue(MailSetNodeMeta{flowgraphId, blockName, NodeMeta{x, y, width, height}});
+                                                   F32 height,
+                                                   std::optional<FlowgraphNode::Layout> base) {
+                std::optional<NodeMeta> saved;
+                if (base.has_value()) {
+                    saved = NodeMeta{base->x, base->y, base->width, base->height};
+                }
+                enqueue(MailSetNodeMeta{
+                    flowgraphId, blockName, NodeMeta{x, y, width, height}, saved});
+            },
+            .onNodeBounds = [record = context.callbacks.recordNodeBounds, flowgraphId](
+                               const std::string& blockName,
+                               Rect bounds,
+                               Extent2D<F32> size,
+                               std::optional<Extent2D<F32>> content) {
+                if (record) record(flowgraphId, blockName, bounds, size, content);
+            },
+            .onNodeConfigCollapse = [enqueue, flowgraphId](const std::string& blockName,
+                                                           bool collapsed) {
+                enqueue(MailSetConfigCollapsed{
+                    flowgraphId, blockName, collapsed});
+            },
+            .onNodeConfigDetach = [enqueue, flowgraphId](const std::string& blockName,
+                                                         bool detached) {
+                enqueue(MailSetConfigDetached{
+                    flowgraphId, blockName, detached});
             },
         };
 
-        const auto blocks = flowgraph->blockList();
-        for (const auto& [blockName, blockPtr] : blocks) {
-            if (!blockPtr || !blockPtr->interface()) {
-                continue;
-            }
+        const auto blocks = context.state.flowgraph.blocks.find(flowgraphId);
+        if (blocks == context.state.flowgraph.blocks.end()) {
+            return config;
+        }
 
-            config.graph.push_back(node.build(flowgraphId, flowgraph, blockName, blockPtr));
+        for (const auto& [blockName, blockData] : blocks->second) {
+            config.graph.push_back(node.build(flowgraphId, flowgraph, blockName,
+                                              blockData));
         }
 
         return config;

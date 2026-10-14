@@ -14,11 +14,14 @@ enum class ModalContent : I32 {
     RemoteStreaming,
     Settings,
     Plugin,
+    Dependencies,
+    Feedback,
 };
 
 enum class SettingsSection : I32 {
     General = 0,
     Remote,
+    Runtime,
     Registry,
     Developer,
     About,

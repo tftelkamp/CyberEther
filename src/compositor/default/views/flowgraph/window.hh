@@ -2,6 +2,7 @@
 #define JETSTREAM_COMPOSITOR_IMPL_DEFAULT_VIEWS_FLOWGRAPH_WINDOW_HH
 
 #include "../components/hint_overlay.hh"
+#include "detached_config.hh"
 #include "editor/base.hh"
 #include "surface.hh"
 #include "stack.hh"
@@ -17,7 +18,7 @@
 
 namespace Jetstream {
 
-struct FlowgraphWindow : public Sakura::Component {
+struct FlowgraphWindow {
     struct Config {
         std::string id;
         std::string title;
@@ -25,15 +26,29 @@ struct FlowgraphWindow : public Sakura::Component {
         FlowgraphEditor::Config editor;
         std::vector<FlowgraphStackWindow::Config> stacks;
         std::vector<FlowgraphDetachedSurface::Config> detachedSurfaces;
+        std::vector<FlowgraphDetachedConfig::Config> detachedConfigs;
         bool empty = false;
+        bool dependencyReviewAvailable = false;
+        Callout::Tone dependencyReviewTone = Callout::Tone::Info;
+        std::string dependencyReviewMessage;
+        std::function<void()> onFocus;
         std::function<void()> onSave;
         std::function<void()> onClose;
         std::function<void()> onCreateStack;
+        std::function<void()> onReviewDependencies;
+        std::function<void()> onOpenExamples;
+        std::function<void(Rect, Rect)> onViewport;
     };
 
     void update(Config config) {
         auto editorConfig = std::move(config.editor);
         editorConfig.openBlockPicker = openBlockPickerRequest;
+        editorConfig.onViewport = [this](Rect viewport) {
+            if (this->config.onViewport) {
+                this->config.onViewport(viewport, {viewport.x + toolbarPlacement.x, viewport.y + toolbarPlacement.y,
+                                                   toolbarPlacement.width, toolbarPlacement.height});
+            }
+        };
         openBlockPickerRequest = false;
         this->config = std::move(config);
 
@@ -43,7 +58,11 @@ struct FlowgraphWindow : public Sakura::Component {
             "Right-click a block to open its context menu.",
             "Use Ctrl+C and Ctrl+V to copy and paste blocks.",
             "Hover over ports to see their data type.",
+            "Source blocks set the buffer size downstream.",
             "Click and drag on empty canvas to pan around.",
+            "Hover over diagnostic icons for details.",
+            "Right-click and reload a block to retry.",
+            "Right-click a block for its documentation.",
         };
 
         const std::string title = this->config.title.empty() ? this->config.id : this->config.title;
@@ -53,16 +72,24 @@ struct FlowgraphWindow : public Sakura::Component {
             .size = {640.0f, 480.0f},
             .dockId = this->config.dockId,
             .padding = Extent2D<F32>{8.0f, 8.0f},
+            .onFocus = this->config.onFocus,
             .onClose = this->config.onClose,
         });
         toolbar.update({
             .id = this->config.id + ":toolbar",
+            .dependencyReviewAvailable = this->config.dependencyReviewAvailable,
+            .dependencyReviewTone = this->config.dependencyReviewTone,
+            .dependencyReviewMessage = this->config.dependencyReviewMessage,
             .onSave = this->config.onSave,
             .onClose = this->config.onClose,
             .onAddBlock = [this]() {
                 openBlockPickerRequest = true;
             },
             .onCreateStack = this->config.onCreateStack,
+            .onReviewDependencies = this->config.onReviewDependencies,
+            .onPlacement = [this](Rect placement) {
+                toolbarPlacement = placement;
+            },
         });
         editor.update(std::move(editorConfig));
 
@@ -106,19 +133,50 @@ struct FlowgraphWindow : public Sakura::Component {
             detachedSurfaceWindows.erase(surfaceId);
         }
 
+        // Update detached config windows.
+
+        detachedConfigOrder.clear();
+        std::unordered_set<std::string> activeConfigs;
+        for (auto& detachedConfig : this->config.detachedConfigs) {
+            detachedConfigOrder.push_back(detachedConfig.id);
+            activeConfigs.insert(detachedConfig.id);
+            detachedConfigWindows[detachedConfig.id].update(std::move(detachedConfig));
+        }
+
+        std::vector<std::string> staleConfigs;
+        for (const auto& [configId, _] : detachedConfigWindows) {
+            if (!activeConfigs.contains(configId)) {
+                staleConfigs.push_back(configId);
+            }
+        }
+        for (const auto& configId : staleConfigs) {
+            detachedConfigWindows.erase(configId);
+        }
+
         if (this->config.empty) {
             hint.update({
                 .id = this->config.id + ":empty-hint",
                 .title = "Getting Started",
-                .subtitle = "Let's get started by adding your first block",
+                .subtitle = "Add your first block, or open a ready-made example.",
                 .steps = {
                     "Double-click anywhere on the canvas.",
                     "Pick a block from the menu.",
-                    "Connect blocks to build your flow.",
+                    "Connect block outputs to inputs.",
+                    "Processing starts automatically.",
                 },
                 .hints = flowgraphHints,
+                .actions = {
+                    {
+                        .id = "open-examples",
+                        .label = ICON_FA_FLASK " Open Examples",
+                        .variant = Sakura::Button::Variant::Action,
+                        .onClick = this->config.onOpenExamples,
+                    },
+                },
+                .size = {420.0f, 430.0f},
             });
         }
+
     }
 
     void render(const Sakura::Context& ctx) {
@@ -139,18 +197,26 @@ struct FlowgraphWindow : public Sakura::Component {
                 detachedSurfaceWindows.at(surfaceId).render(ctx);
             }
         }
+        for (const auto& configId : detachedConfigOrder) {
+            if (detachedConfigWindows.contains(configId)) {
+                detachedConfigWindows.at(configId).render(ctx);
+            }
+        }
     }
 
  private:
     Config config;
     Sakura::Window window;
     FlowgraphToolbar toolbar;
+    Rect toolbarPlacement;
     FlowgraphEditor editor;
     HintOverlay hint;
     std::vector<std::string> stackOrder;
     std::unordered_map<std::string, FlowgraphStackWindow> stackWindows;
     std::vector<std::string> detachedSurfaceOrder;
     std::unordered_map<std::string, FlowgraphDetachedSurface> detachedSurfaceWindows;
+    std::vector<std::string> detachedConfigOrder;
+    std::unordered_map<std::string, FlowgraphDetachedConfig> detachedConfigWindows;
     bool openBlockPickerRequest = false;
 };
 

@@ -1,7 +1,7 @@
 #ifndef JETSTREAM_COMPOSITOR_IMPL_DEFAULT_VIEWS_HUD_WELCOME_HH
 #define JETSTREAM_COMPOSITOR_IMPL_DEFAULT_VIEWS_HUD_WELCOME_HH
 
-#include "jetstream/render/sakura/sakura.hh"
+#include "jetstream/render/sakura/base.hh"
 #include "jetstream/render/tools/imgui_icons_ext.hh"
 
 #include <functional>
@@ -10,7 +10,7 @@
 
 namespace Jetstream {
 
-struct WelcomeHudTitle : public Sakura::Component {
+struct WelcomeHudTitle {
     struct Config {
         std::string title;
         std::string slogan;
@@ -21,17 +21,18 @@ struct WelcomeHudTitle : public Sakura::Component {
         title.update({
             .id = "WelcomeTitle",
             .str = this->config.title,
-            .font = Sakura::Text::Font::Bold,
+            .font = Sakura::Text::Font::Display,
             .align = Sakura::Text::Align::Center,
             .colorKey = "cyber_blue",
-            .scale = 6.0f,
+            .scale = 8.5f,
         });
         slogan.update({
             .id = "WelcomeSlogan",
             .str = this->config.slogan,
+            .font = Sakura::Text::Font::Display,
             .tone = Sakura::Text::Tone::Secondary,
             .align = Sakura::Text::Align::Center,
-            .scale = 1.3f,
+            .scale = 2.3f,
         });
     }
 
@@ -46,12 +47,11 @@ struct WelcomeHudTitle : public Sakura::Component {
     Sakura::Text slogan;
 };
 
-struct WelcomeHudCell : public Sakura::Component {
+struct WelcomeHudCell {
     struct Config {
         std::string id;
         std::string icon;
         std::string title;
-        std::string subtitle;
         std::string iconColorKey;
         std::function<void()> onClick;
     };
@@ -60,8 +60,8 @@ struct WelcomeHudCell : public Sakura::Component {
         this->config = std::move(config);
         card.update({
             .id = this->config.id,
-            .size = {176.0f, 118.0f},
-            .padding = 20.0f,
+            .size = {0.0f, 118.0f},
+            .padding = 16.0f,
             .rounding = 16.0f,
             .border = true,
             .scrollbar = false,
@@ -84,18 +84,15 @@ struct WelcomeHudCell : public Sakura::Component {
             .align = Sakura::Text::Align::Center,
             .colorKey = this->config.iconColorKey,
             .scale = 2.0f,
+            .verticalOffset = 13.0f,
         });
         title.update({
             .id = this->config.id + "Title",
             .str = this->config.title,
             .font = Sakura::Text::Font::Bold,
             .align = Sakura::Text::Align::Center,
-        });
-        subtitle.update({
-            .id = this->config.id + "Subtitle",
-            .str = this->config.subtitle,
-            .tone = Sakura::Text::Tone::Secondary,
-            .align = Sakura::Text::Align::Center,
+            .scale = 1.15f,
+            .verticalOffset = 4.0f,
         });
     }
 
@@ -104,7 +101,6 @@ struct WelcomeHudCell : public Sakura::Component {
             content.render(ctx, {
                 [this](const Sakura::Context& ctx) { icon.render(ctx); },
                 [this](const Sakura::Context& ctx) { title.render(ctx); },
-                [this](const Sakura::Context& ctx) { subtitle.render(ctx); },
             });
         });
     }
@@ -115,12 +111,10 @@ struct WelcomeHudCell : public Sakura::Component {
     Sakura::VStack content;
     Sakura::Text icon;
     Sakura::Text title;
-    Sakura::Text subtitle;
 };
 
-struct WelcomeHudView : public Sakura::Component {
+struct WelcomeHudView {
     struct Config {
-        bool visible = false;
         std::string version;
         std::function<void()> onNewFlowgraph;
         std::function<void()> onOpenFlowgraph;
@@ -145,7 +139,7 @@ struct WelcomeHudView : public Sakura::Component {
         });
         title.update({
             .title = "CyberEther",
-            .slogan = "GPU-accelerated Signal Processing",
+            .slogan = "GPU-ACCELERATED SIGNAL PROCESSING",
         });
         actions.update({
             .id = "WelcomeActions",
@@ -175,7 +169,6 @@ struct WelcomeHudView : public Sakura::Component {
             .id = "WelcomeNewCard",
             .icon = ICON_FA_FILE_CIRCLE_PLUS,
             .title = "New Flowgraph",
-            .subtitle = "Start fresh",
             .iconColorKey = "welcome_icon_new",
             .onClick = [this]() {
                 if (this->config.onNewFlowgraph) {
@@ -186,8 +179,7 @@ struct WelcomeHudView : public Sakura::Component {
         openCell.update({
             .id = "WelcomeOpenCard",
             .icon = ICON_FA_FOLDER_OPEN,
-            .title = "Open File",
-            .subtitle = "Load existing",
+            .title = "Open Flowgraph",
             .iconColorKey = "welcome_icon_open",
             .onClick = [this]() {
                 if (this->config.onOpenFlowgraph) {
@@ -199,7 +191,6 @@ struct WelcomeHudView : public Sakura::Component {
             .id = "WelcomeExamplesCard",
             .icon = ICON_FA_FLASK,
             .title = "Examples",
-            .subtitle = "Quick start",
             .iconColorKey = "welcome_icon_examples",
             .onClick = [this]() {
                 if (this->config.onOpenExamples) {
@@ -240,10 +231,6 @@ struct WelcomeHudView : public Sakura::Component {
     }
 
     void render(const Sakura::Context& ctx) const {
-        if (!config.visible) {
-            return;
-        }
-
         hud.render(ctx, [this](const Sakura::Context& ctx) {
             title.render(ctx);
             welcomeSpacing.render(ctx);

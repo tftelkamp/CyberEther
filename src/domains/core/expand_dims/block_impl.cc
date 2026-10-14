@@ -27,8 +27,8 @@ Result ExpandDimsImpl::define() {
 
     JST_CHECK(defineInterfaceConfig("axis",
                                     "Axis",
-                                    "Position to insert the new dimension (0-indexed).",
-                                    "int:"));
+                                    "Position to insert the new dimension. Negative axes count from the end. An axis of -1 appends.",
+                                    {{"type", "int"}}));
 
     return Result::SUCCESS;
 }
@@ -43,6 +43,6 @@ Result ExpandDimsImpl::create() {
     return Result::SUCCESS;
 }
 
-JST_REGISTER_BLOCK(ExpandDimsImpl);
+JST_REGISTER_BLOCK(ExpandDimsImpl, {"expand_dims"});
 
 }  // namespace Jetstream::Blocks

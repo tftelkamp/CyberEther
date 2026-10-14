@@ -35,18 +35,22 @@ Result ArithmeticImpl::define() {
     JST_CHECK(defineInterfaceConfig("operation",
                                     "Operation",
                                     "Arithmetic operation to apply.",
-                                    "dropdown:add(Add),sub(Subtract),"
-                                    "mul(Multiply),div(Divide)"));
+                                    {{"type", "dropdown"}, {"options", Parser::Sequence{
+                                        Parser::Map{{"label", "Add"}, {"value", "add"}},
+                                        Parser::Map{{"label", "Subtract"}, {"value", "sub"}},
+                                        Parser::Map{{"label", "Multiply"}, {"value", "mul"}},
+                                        Parser::Map{{"label", "Divide"}, {"value", "div"}},
+                                    }}}));
 
     JST_CHECK(defineInterfaceConfig("axis",
                                     "Axis",
-                                    "Axis along which to reduce.",
-                                    "int:"));
+                                    "Axis along which to reduce. Negative axes count from the end.",
+                                    {{"type", "int"}}));
 
     JST_CHECK(defineInterfaceConfig("squeeze",
                                     "Squeeze",
                                     "Remove the reduced dimension.",
-                                    "bool"));
+                                    {{"type", "bool"}}));
 
     return Result::SUCCESS;
 }
@@ -60,6 +64,6 @@ Result ArithmeticImpl::create() {
     return Result::SUCCESS;
 }
 
-JST_REGISTER_BLOCK(ArithmeticImpl);
+JST_REGISTER_BLOCK(ArithmeticImpl, {"arithmetic"});
 
 }  // namespace Jetstream::Blocks

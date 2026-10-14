@@ -3,17 +3,19 @@ fs = import('fs')
 shader_pkg_lst = []
 
 subdir('global')
+subdir('adsb')
 subdir('constellation')
-subdir('lineplot')
+subdir('frame')
+subdir('signal_view')
 subdir('map')
 subdir('spectrogram')
-subdir('waterfall')
 
 foreach shader_pkg: shader_pkg_lst
     name = shader_pkg.get('name')
     shaders = shader_pkg.get('shaders')
     kernels = shader_pkg.get('kernels')
-    tracking = []
+    shader_includes = shader_pkg.get('includes', [])
+    msl_args = shader_pkg.get('msl_args', [])
     shader_lst = []
     kernel_lst = []
 
@@ -28,6 +30,7 @@ foreach shader_pkg: shader_pkg_lst
         if build_spirv
             spirv_vert = custom_target(
                 input: shader[0],
+                depend_files: shader_includes,
                 output: name + '_' + fs.stem(shader[0]) + '.spv',
                 command: [glslang_bin, '--quiet', '-V', '-S', 'vert', '@INPUT@', '-o', '@OUTPUT@'],
                 build_by_default: true,
@@ -35,12 +38,12 @@ foreach shader_pkg: shader_pkg_lst
 
             spirv_frag = custom_target(
                 input: shader[1],
+                depend_files: shader_includes,
                 output: name + '_' + fs.stem(shader[1]) + '.spv',
                 command: [glslang_bin, '--quiet', '-V', '-S', 'frag', '@INPUT@', '-o', '@OUTPUT@'],
                 build_by_default: true,
             )
 
-            tracking += [spirv_vert, spirv_frag]
             shader_lst += [spirv_vert, spirv_frag]
             cfg_lst.set('JETSTREAM_SHADERS_VULKAN_AVAILABLE', true)
         endif
@@ -55,14 +58,14 @@ foreach shader_pkg: shader_pkg_lst
             msl_vert = custom_target(
                 input: spirv_vert,
                 output: name + '_' + fs.stem(shader[0]) + '.msl',
-                command: [spirvcross_bin, '--msl', '@INPUT@', '--output', '@OUTPUT@', '--msl-version', '30000'],
+                command: [spirvcross_bin, '--msl'] + msl_args + ['@INPUT@', '--output', '@OUTPUT@', '--msl-version', '30000'],
                 build_by_default: true,
             )
 
             msl_frag = custom_target(
                 input: spirv_frag,
                 output: name + '_' + fs.stem(shader[1]) + '.msl',
-                command: [spirvcross_bin, '--msl', '@INPUT@', '--output', '@OUTPUT@', '--msl-version', '30000'],
+                command: [spirvcross_bin, '--msl'] + msl_args + ['@INPUT@', '--output', '@OUTPUT@', '--msl-version', '30000'],
                 build_by_default: true,
             )
 
@@ -113,7 +116,6 @@ foreach shader_pkg: shader_pkg_lst
                 build_by_default: true,
             )
 
-            tracking += [spirv]
             kernel_lst += [spirv]
             cfg_lst.set('JETSTREAM_SHADERS_VULKAN_AVAILABLE', true)
         endif
@@ -162,9 +164,9 @@ foreach shader_pkg: shader_pkg_lst
 
     if build_spirv
         shader_obj = custom_target(
+            input: shader_lst + kernel_lst,
             output: name + '_shaders.hh',
-            command: [py, files('parser.py'), meson.project_build_root(), name],
-            depends: shader_lst + kernel_lst,
+            command: [py, files('parser.py'), meson.project_build_root(), name, '@INPUT@'],
         )
 
         dep_lst += declare_dependency(

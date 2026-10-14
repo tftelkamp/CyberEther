@@ -30,6 +30,7 @@ Result SliceImpl::validate() {
 Result SliceImpl::configure() {
     sliceModuleConfig->slice = slice;
     duplicateModuleConfig->hostAccessible = true;
+    duplicateModuleConfig->outputDevice = GetDeviceName(device());
 
     return Result::SUCCESS;
 }
@@ -41,12 +42,12 @@ Result SliceImpl::define() {
     JST_CHECK(defineInterfaceConfig("slice",
                                     "Slice",
                                     "NumPy-style slice notation (e.g., [0:10, ...]).",
-                                    "text"));
+                                    {{"type", "text"}}));
 
     JST_CHECK(defineInterfaceConfig("contiguous",
                                     "Contiguous",
                                     "Copy data to ensure contiguous memory layout.",
-                                    "bool"));
+                                    {{"type", "bool"}}));
 
     return Result::SUCCESS;
 }
@@ -68,6 +69,8 @@ Result SliceImpl::create() {
     return Result::SUCCESS;
 }
 
-JST_REGISTER_BLOCK(SliceImpl);
+JST_REGISTER_BLOCK(SliceImpl,
+                   {"slice"},
+                   {"duplicate", true});
 
 }  // namespace Jetstream::Blocks

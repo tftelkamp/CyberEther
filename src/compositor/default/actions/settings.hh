@@ -1,18 +1,22 @@
 #ifndef JETSTREAM_COMPOSITOR_IMPL_DEFAULT_ACTIONS_SETTINGS_HH
 #define JETSTREAM_COMPOSITOR_IMPL_DEFAULT_ACTIONS_SETTINGS_HH
 
+#include "persist.hh"
 #include "../model/callbacks.hh"
 #include "../model/messages.hh"
 #include "../model/state.hh"
 
 #include "jetstream/logger.hh"
+#include "jetstream/platform.hh"
 #include "jetstream/plugin.hh"
 #include "jetstream/settings.hh"
+#include "runtime/python/dependencies/coordinator.hh"
 
 #include <algorithm>
 #include <filesystem>
 #include <optional>
 #include <tuple>
+#include <utility>
 
 namespace Jetstream {
 
@@ -24,10 +28,15 @@ struct SettingsActions {
                               MailSetGraphicsFramerate,
                               MailSetSettingsSection,
                               MailSetDebugLatencyEnabled,
-                              MailSetDebugRuntimeMetricsEnabled,
+                              MailSetDebugTimingEnabled,
                               MailSetDebugLogLevel,
                               MailCheckForUpdates,
+                              MailDownloadUpdate,
+                              MailApplyUpdate,
                               MailDismissUpdate,
+                              MailSetPythonRuntimePath,
+                              MailSetRuntimeDependencyPolicy,
+                              MailOpenPythonEnvironmentCache,
                               MailAddPluginPath,
                               MailRemovePluginPath,
                               MailReloadPlugin,
@@ -44,10 +53,9 @@ struct SettingsActions {
     Result handle(const MailSetInfoPanelEnabled& msg) {
         state.interface.infoPanelEnabled = msg.value;
 
-        Settings settings;
-        JST_CHECK(Settings::Get(settings));
-        settings.interface.infoPanelEnabled = msg.value;
-        JST_CHECK(Settings::Set(settings));
+        JST_CHECK(PersistSettings([&](Settings& settings) {
+            settings.interface.infoPanelEnabled = msg.value;
+        }));
 
         return Result::SUCCESS;
     }
@@ -55,10 +63,9 @@ struct SettingsActions {
     Result handle(const MailSetBackgroundParticles& msg) {
         state.interface.backgroundParticles = msg.value;
 
-        Settings settings;
-        JST_CHECK(Settings::Get(settings));
-        settings.interface.backgroundParticles = msg.value;
-        JST_CHECK(Settings::Set(settings));
+        JST_CHECK(PersistSettings([&](Settings& settings) {
+            settings.interface.backgroundParticles = msg.value;
+        }));
 
         return Result::SUCCESS;
     }
@@ -67,10 +74,9 @@ struct SettingsActions {
         state.graphics.scale = msg.value;
         state.system.render->setScale(msg.value);
 
-        Settings settings;
-        JST_CHECK(Settings::Get(settings));
-        settings.graphics.scale = msg.value;
-        JST_CHECK(Settings::Set(settings));
+        JST_CHECK(PersistSettings([&](Settings& settings) {
+            settings.graphics.scale = msg.value;
+        }));
 
         return Result::SUCCESS;
     }
@@ -80,10 +86,9 @@ struct SettingsActions {
             ? std::optional<DeviceType>{}
             : std::optional<DeviceType>{msg.value};
 
-        Settings settings;
-        JST_CHECK(Settings::Get(settings));
-        settings.graphics.device = state.graphics.device;
-        JST_CHECK(Settings::Set(settings));
+        JST_CHECK(PersistSettings([&](Settings& settings) {
+            settings.graphics.device = state.graphics.device;
+        }));
 
         return Result::SUCCESS;
     }
@@ -91,10 +96,9 @@ struct SettingsActions {
     Result handle(const MailSetGraphicsFramerate& msg) {
         state.graphics.framerate = msg.value;
 
-        Settings settings;
-        JST_CHECK(Settings::Get(settings));
-        settings.graphics.framerate = msg.value;
-        JST_CHECK(Settings::Set(settings));
+        JST_CHECK(PersistSettings([&](Settings& settings) {
+            settings.graphics.framerate = msg.value;
+        }));
 
         return Result::SUCCESS;
     }
@@ -107,21 +111,19 @@ struct SettingsActions {
     Result handle(const MailSetDebugLatencyEnabled& msg) {
         state.debug.latencyEnabled = msg.value;
 
-        Settings settings;
-        JST_CHECK(Settings::Get(settings));
-        settings.developer.latencyEnabled = msg.value;
-        JST_CHECK(Settings::Set(settings));
+        JST_CHECK(PersistSettings([&](Settings& settings) {
+            settings.developer.latencyEnabled = msg.value;
+        }));
 
         return Result::SUCCESS;
     }
 
-    Result handle(const MailSetDebugRuntimeMetricsEnabled& msg) {
-        state.debug.runtimeMetricsEnabled = msg.value;
+    Result handle(const MailSetDebugTimingEnabled& msg) {
+        state.debug.timingEnabled = msg.value;
 
-        Settings settings;
-        JST_CHECK(Settings::Get(settings));
-        settings.developer.runtimeMetricsEnabled = msg.value;
-        JST_CHECK(Settings::Set(settings));
+        JST_CHECK(PersistSettings([&](Settings& settings) {
+            settings.developer.timingEnabled = msg.value;
+        }));
 
         return Result::SUCCESS;
     }
@@ -130,21 +132,86 @@ struct SettingsActions {
         state.debug.logLevel = msg.value;
         JST_LOG_SET_DEBUG_LEVEL(state.debug.logLevel);
 
-        Settings settings;
-        JST_CHECK(Settings::Get(settings));
-        settings.developer.logLevel = state.debug.logLevel;
-        JST_CHECK(Settings::Set(settings));
+        JST_CHECK(PersistSettings([&](Settings& settings) {
+            settings.developer.logLevel = state.debug.logLevel;
+        }));
 
         return Result::SUCCESS;
     }
 
     Result handle(const MailCheckForUpdates&) {
-        state.update.checking = true;
+        callbacks.checkForUpdates();
+        return Result::SUCCESS;
+    }
+
+    Result handle(const MailDownloadUpdate&) {
+        callbacks.downloadUpdate();
+        return Result::SUCCESS;
+    }
+
+    Result handle(const MailApplyUpdate&) {
+        if (callbacks.applyUpdate()) {
+            return state.system.instance->requestStop();
+        }
         return Result::SUCCESS;
     }
 
     Result handle(const MailDismissUpdate&) {
-        state.update.available = false;
+        callbacks.dismissUpdate();
+        return Result::SUCCESS;
+    }
+
+    Result handle(const MailSetPythonRuntimePath& msg) {
+        state.runtime.pythonPath = msg.value;
+        state.runtime.pythonValidation = PythonRuntimeContext::ValidateRuntimePath(msg.value);
+
+        if (!state.runtime.pythonValidation.valid) {
+            return Result::SUCCESS;
+        }
+
+        JST_CHECK(PersistSettings([&](Settings& settings) {
+            settings.runtime.python.path = msg.value;
+        }));
+
+        return Result::SUCCESS;
+    }
+
+    Result handle(const MailSetRuntimeDependencyPolicy& msg) {
+        if (msg.value != "prompt" && msg.value != "allow" && msg.value != "deny") {
+            JST_WARN("[COMPOSITOR_IMPL_DEFAULT] Ignoring invalid runtime dependency policy '{}'.",
+                     msg.value);
+            return Result::SUCCESS;
+        }
+
+        JST_CHECK(SetPythonDependencyPolicy(msg.value));
+        state.runtime.dependencyPolicy = msg.value;
+
+        JST_CHECK(PersistSettings([&](Settings& settings) {
+            settings.runtime.dependencyPolicy = msg.value;
+        }));
+
+        return Result::SUCCESS;
+    }
+
+    Result handle(const MailOpenPythonEnvironmentCache&) {
+        std::string cacheValue;
+        if (Platform::CachePath(cacheValue) != Result::SUCCESS) {
+            callbacks.notify(Sakura::ToastType::Error,
+                             5000,
+                             "Failed to locate the Python environment cache.");
+            return Result::SUCCESS;
+        }
+
+        const auto path = Platform::PathFromUtf8(cacheValue) /
+                          "python-environments";
+        std::error_code ec;
+        std::filesystem::create_directories(path, ec);
+        if (ec || Platform::OpenFolder(Platform::PathToUtf8(path)) !=
+                      Result::SUCCESS) {
+            callbacks.notify(Sakura::ToastType::Error,
+                             5000,
+                             "Failed to open the Python environment cache.");
+        }
         return Result::SUCCESS;
     }
 
@@ -154,7 +221,12 @@ struct SettingsActions {
             return Result::SUCCESS;
         }
 
-        if (!std::filesystem::exists(msg.path)) {
+        if (Platform::PathFromUtf8(msg.path).extension() != ".cep") {
+            callbacks.notify(Sakura::ToastType::Error, 5000, "Plugins must be .cep bundles.");
+            return Result::SUCCESS;
+        }
+
+        if (!std::filesystem::exists(Platform::PathFromUtf8(msg.path))) {
             callbacks.notify(Sakura::ToastType::Error, 5000, "The selected plugin does not exist.");
             return Result::SUCCESS;
         }
@@ -178,7 +250,7 @@ struct SettingsActions {
         }
 
         settings.registry.plugins.push_back(msg.path);
-        JST_CHECK(Settings::Set(settings));
+        JST_CHECK(Settings::SetAsync(settings));
 
         state.settings.section = SettingsSection::Registry;
         state.modal.content = ModalContent::Settings;
@@ -202,7 +274,7 @@ struct SettingsActions {
             return Result::SUCCESS;
         }
 
-        JST_CHECK(Settings::Set(settings));
+        JST_CHECK(Settings::SetAsync(settings));
         callbacks.notify(Sakura::ToastType::Success, 5000, "Plugin removed. Restart CyberEther to unload registered blocks.");
         return Result::SUCCESS;
     }
@@ -213,7 +285,12 @@ struct SettingsActions {
             return Result::SUCCESS;
         }
 
-        if (!std::filesystem::exists(msg.path)) {
+        if (Platform::PathFromUtf8(msg.path).extension() != ".cep") {
+            callbacks.notify(Sakura::ToastType::Error, 5000, "Plugins must be .cep bundles.");
+            return Result::SUCCESS;
+        }
+
+        if (!std::filesystem::exists(Platform::PathFromUtf8(msg.path))) {
             callbacks.notify(Sakura::ToastType::Error, 5000, "The selected plugin does not exist.");
             return Result::SUCCESS;
         }
@@ -257,10 +334,16 @@ struct SettingsActions {
                                  "Cannot reload plugin because a registered path is empty.");
                 return Result::SUCCESS;
             }
-            if (!std::filesystem::exists(path)) {
+            if (Platform::PathFromUtf8(path).extension() != ".cep") {
                 callbacks.notify(Sakura::ToastType::Error,
                                  5000,
-                                 "A registered plugin does not exist: " + path);
+                                 jst::fmt::format("Registered plugins must be .cep bundles: {}", path));
+                return Result::SUCCESS;
+            }
+            if (!std::filesystem::exists(Platform::PathFromUtf8(path))) {
+                callbacks.notify(Sakura::ToastType::Error,
+                                 5000,
+                                 jst::fmt::format("A registered plugin does not exist: {}", path));
                 return Result::SUCCESS;
             }
         }
@@ -269,7 +352,7 @@ struct SettingsActions {
             if (Plugin::Reload(path) != Result::SUCCESS) {
                 callbacks.notify(Sakura::ToastType::Error,
                                  5000,
-                                 "Failed to reload plugin: " + path);
+                                 jst::fmt::format("Failed to reload plugin: {}", path));
                 return Result::SUCCESS;
             }
         }
@@ -277,7 +360,7 @@ struct SettingsActions {
         const auto count = settings.registry.plugins.size();
         callbacks.notify(Sakura::ToastType::Success,
                          3000,
-                         "Reloaded modules from " + std::to_string(count) + (count == 1 ? " plugin." : " plugins."));
+                         jst::fmt::format("Reloaded modules from {} plugin{}.", count, count == 1 ? "" : "s"));
         return Result::SUCCESS;
     }
 

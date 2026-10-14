@@ -9,155 +9,162 @@ permissions:
   contents: read
 
 jobs:
-  linux:
-    uses: ./.github/workflows/linux-build.yml
-
-  wheel:
-    uses: ./.github/workflows/wheel-build.yml
-
-  windows:
-    uses: ./.github/workflows/windows-build.yml
-
-  macos-build:
-    uses: ./.github/workflows/macos-build.yml
-
-  macos-package:
-    needs: macos-build
-    runs-on: macos-14
-    environment: macos-notarization
-    env:
-      CYBERETHER_BINARY: .dist/bin/cyberether
-      JETSTREAM_DYLIB: .dist/bin/libjetstream.dylib
-      OUTPUT_DIR: .dist/macos
-      APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
-      APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
-      APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
-      APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-      APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
-      APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+  validate-version:
+    name: validate version
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: cyberether-macos-arm64
-          path: .dist/artifacts
-
-      - name: Extract macOS binary archive
+      - name: Read project version
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p .dist/bin
-          tar -C .dist/bin -xzf .dist/artifacts/cyberether-macos-arm64.tar.gz
-          test -f .dist/bin/cyberether
-          test -f .dist/bin/libjetstream.dylib
+          version="$(awk -F"'" '/^[[:space:]]*version:/ { print $2; exit }' meson.build)"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Invalid project version in meson.build: %s\n' "$version" >&2
+            exit 1
+          fi
+          printf 'PROJECT_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
 
-      - name: Package app bundle
-        run: apps/macos/create-app.sh
+      - name: Validate release tag
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_tag="v${PROJECT_VERSION}"
+          if [[ "$GITHUB_REF_NAME" != "$expected_tag" ]]; then
+            printf 'Release tag %s does not match project version %s. Expected %s.\n' \
+              "$GITHUB_REF_NAME" "$PROJECT_VERSION" "$expected_tag" >&2
+            exit 1
+          fi
+          printf 'Validated release version %s (%s).\n' "$PROJECT_VERSION" "$GITHUB_REF_NAME"
 
-      - name: Package app notarization
-        run: apps/macos/sign-notarize-app.sh
+  prepare-release:
+    needs: validate-version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Prepare release notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p .dist
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            gh release view "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json body \
+              --jq .body > .dist/release-notes.md
+          else
+            : > .dist/release-notes.md
+          fi
 
-      - name: Package DMG
-        run: apps/macos/create-dmg.sh
-
-      - name: Package DMG notarization
-        run: apps/macos/sign-notarize-dmg.sh
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: cyberether-macos-dmg
-          path: .dist/macos/*.dmg
+          name: cyberether-release-notes
+          path: .dist/release-notes.md
+
+  linux:
+    needs: prepare-release
+    uses: ./.github/workflows/linux.yml
+    with:
+      package_desktop: true
+
+  wheel:
+    needs: prepare-release
+    uses: ./.github/workflows/wheel.yml
+
+  windows:
+    needs: prepare-release
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/windows.yml
+    with:
+      package_desktop: true
+
+  macos:
+    needs: prepare-release
+    uses: ./.github/workflows/macos.yml
+    with:
+      package_desktop: true
+    secrets: inherit
 
   emscripten:
-    uses: ./.github/workflows/emscripten-build.yml
+    needs: prepare-release
+    uses: ./.github/workflows/emscripten.yml
 
   containers:
-    uses: ./.github/workflows/container-build.yml
+    needs: prepare-release
+    uses: ./.github/workflows/container.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      publish: ${{ github.event_name == 'push' }}
 
   github-release:
     if: github.event_name == 'push'
-    needs: [linux, wheel, windows, macos-build, macos-package, emscripten]
+    needs: [linux, wheel, windows, macos, emscripten, containers]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4.3.0
         with:
-          pattern: '*manylinux*'
+          pattern: 'cyberether-bin-linux-*'
           path: .dist/artifacts
           merge-multiple: true
 
       - uses: actions/download-artifact@v4.3.0
         with:
-          name: cyberether-windows-x86_64
+          pattern: 'superluminal-wheel-manylinux-*'
+          path: .dist/artifacts
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4.3.0
+        with:
+          pattern: 'cyberether-release-linux-*'
+          path: .dist/artifacts
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4.3.0
+        with:
+          name: cyberether-bin-windows-x86_64
           path: .dist/artifacts
 
       - uses: actions/download-artifact@v4.3.0
         with:
-          name: cyberether-macos-arm64
+          name: cyberether-release-windows-x86_64
           path: .dist/artifacts
 
       - uses: actions/download-artifact@v4.3.0
         with:
-          name: cyberether-macos-dmg
+          name: cyberether-bin-macos-arm64
           path: .dist/artifacts
 
       - uses: actions/download-artifact@v4.3.0
         with:
-          name: cyberether-emscripten-wasm32
+          name: cyberether-release-macos-arm64
           path: .dist/artifacts
 
-      - name: Release
-        uses: softprops/action-gh-release@v2.6.2
-        with:
-          files: |
-            .dist/artifacts/*.tar.gz
-            .dist/artifacts/*.dmg
-
-  publish-containers:
-    if: github.event_name == 'push'
-    name: publish (${{ matrix.arch }})
-    needs: containers
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x86_64
-            runner: ubuntu-latest
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-    permissions:
-      contents: read
-      packages: write
-    steps:
       - uses: actions/download-artifact@v4.3.0
         with:
-          name: cyberether-ubuntu24-${{ matrix.arch }}
-          path: .dist/images
+          name: cyberether-bin-emscripten-wasm32
+          path: .dist/artifacts
 
-      - name: Load image
+      - name: Upload release artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          gzip -dc .dist/images/cyberether-ubuntu24-${{ matrix.arch }}.tar.gz | docker load
+          gh release upload "$GITHUB_REF_NAME" \
+            .dist/artifacts/* \
+            --clobber \
+            --repo "$GITHUB_REPOSITORY"
 
-      - name: Login to GHCR
-        uses: docker/login-action@v3.7.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Push to GHCR
-        run: |
-          set -euo pipefail
-          REPO_LOWER="$(printf '%s' "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
-          TAG_BASE="ghcr.io/${REPO_LOWER}"
-          BASE_TAG="ubuntu24-${{ matrix.arch }}"
-          VERSION_TAG="${GITHUB_REF_NAME}-${BASE_TAG}"
-
-          docker tag local/cyberether:${{ matrix.arch }} "${TAG_BASE}:${BASE_TAG}"
-          docker push "${TAG_BASE}:${BASE_TAG}"
-
-          docker tag local/cyberether:${{ matrix.arch }} "${TAG_BASE}:${VERSION_TAG}"
-          docker push "${TAG_BASE}:${VERSION_TAG}"
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"

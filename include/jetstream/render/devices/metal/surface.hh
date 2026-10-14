@@ -7,7 +7,7 @@
 namespace Jetstream::Render {
 
 template<>
-class SurfaceImp<DeviceType::Metal> : public Surface {
+class JETSTREAM_API SurfaceImp<DeviceType::Metal> : public Surface {
  public:
     explicit SurfaceImp(const Config& config);
 
@@ -17,10 +17,12 @@ class SurfaceImp<DeviceType::Metal> : public Surface {
     const Extent2D<U64>& size(const Extent2D<U64>& size) override;
 
  protected:
-    Result draw(MTL::CommandBuffer* commandBuffer);
+    Result prepare();
+    Result draw(MTL::CommandBuffer* commandBuffer, bool visible = true);
 
  private:
     Extent2D<U64> requestedSize;
+    bool framebufferChanged = false;
     MTL::RenderPassDescriptor* renderPassDescriptor = nullptr;
     std::shared_ptr<TextureImp<DeviceType::Metal>> framebuffer;
     std::shared_ptr<TextureImp<DeviceType::Metal>> framebufferResolve;

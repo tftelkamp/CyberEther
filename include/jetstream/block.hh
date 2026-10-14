@@ -12,7 +12,6 @@
 #include "jetstream/parser.hh"
 #include "jetstream/tensor_link.hh"
 #include "jetstream/module.hh"
-#include "jetstream/render/base.hh"
 
 namespace Jetstream {
 
@@ -26,7 +25,16 @@ class JETSTREAM_API Block {
     // Types & Nested Structs
 
     struct Impl;
+    struct Context;
     struct Interface;
+
+    enum class NodeSize : U8 {
+        XS = 0,
+        S,
+        M,
+        L,
+        XL,
+    };
 
     struct Config {
         virtual ~Config() = default;
@@ -36,6 +44,9 @@ class JETSTREAM_API Block {
         virtual std::string title() const = 0;
         virtual std::string summary() const = 0;
         virtual std::string description() const = 0;
+        virtual NodeSize nodeSize() const {
+            return NodeSize::S;
+        }
 
         virtual Result serialize(Parser::Map& data) const = 0;
         virtual Result deserialize(const Parser::Map& data) = 0;
@@ -66,9 +77,7 @@ class JETSTREAM_API Block {
                   const ProviderType& provider,
                   const Parser::Map& config,
                   const TensorMap& inputs,
-                  const std::shared_ptr<Instance>& instance,
-                  const std::shared_ptr<Render::Window>& render,
-                  const std::shared_ptr<Scheduler>& scheduler);
+                  const std::shared_ptr<Block::Context>& context);
     Result destroy();
 
     // Configuration
@@ -99,6 +108,8 @@ class JETSTREAM_API Block {
 
  private:
     std::shared_ptr<Impl> impl;
+
+    friend class Flowgraph;
 };
 
 JETSTREAM_API const char* GetBlockStateName(const Block::State& state);
@@ -144,6 +155,13 @@ template <> struct jst::fmt::formatter<Jetstream::Block::State> : jst::fmt::ostr
         return DOMAIN; \
     }
 #endif  // JST_BLOCK_DOMAIN
+
+#ifndef JST_BLOCK_NODE_SIZE
+#define JST_BLOCK_NODE_SIZE(SIZE) \
+    Jetstream::Block::NodeSize nodeSize() const override { \
+        return Jetstream::Block::NodeSize::SIZE; \
+    }
+#endif  // JST_BLOCK_NODE_SIZE
 
 #ifndef JST_BLOCK_DESCRIPTION
 #define JST_BLOCK_DESCRIPTION(TITLE, SUMMARY, DESCRIPTION) \

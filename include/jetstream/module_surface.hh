@@ -8,14 +8,15 @@
 
 namespace Jetstream {
 
-struct Module::Surface {
+struct JETSTREAM_API Module::Surface {
  public:
     Surface();
     ~Surface();
 
-    const std::vector<SurfaceManifest>& manifests() const;
+    std::vector<SurfaceManifest> manifests() const;
+    SurfaceCursor cursor() const;
 
-    void pushMouseEvent(const MouseEvent& event);
+    void pushInputEvent(const InputEvent& event);
     void pushSurfaceEvent(const SurfaceEvent& event);
 
  private:

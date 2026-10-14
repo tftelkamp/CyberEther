@@ -25,10 +25,10 @@ Result AdsbImpl::define() {
                                     "Aircraft",
                                     "Tracked aircraft from decoded "
                                     "ADS-B frames.",
-                                    "table",
+                                    {{"type", "table"}},
         [this]() -> std::any {
             if (!moduleImpl) {
-                return std::string("No data.");
+                return Parser::Map{};
             }
             return moduleImpl->getAircraftTable();
         }));
@@ -46,6 +46,6 @@ Result AdsbImpl::create() {
     return Result::SUCCESS;
 }
 
-JST_REGISTER_BLOCK(AdsbImpl);
+JST_REGISTER_BLOCK(AdsbImpl, {"adsb"});
 
 }  // namespace Jetstream::Blocks

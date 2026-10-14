@@ -10,12 +10,15 @@
 
 #include "jetstream/block.hh"
 #include "jetstream/flowgraph.hh"
-#include "jetstream/render/sakura/sakura.hh"
+#include "jetstream/flowgraph_view.hh"
+#include "jetstream/render/sakura/base.hh"
 
 #include <algorithm>
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -40,40 +43,52 @@ inline std::optional<std::pair<std::string, std::string>> ParseStackSurfaceItemK
     return std::make_pair(rest.substr(0, delimiter), rest.substr(delimiter + 1));
 }
 
-inline std::optional<Sakura::DockLayout::Direction> ToSakuraDockDirection(const std::string& direction) {
+inline std::string MakeStackConfigItemKey(const std::string& block) {
+    return "config:" + block;
+}
+
+inline std::optional<std::string> ParseStackConfigItemKey(const std::string& key) {
+    static const std::string prefix = "config:";
+    if (key.rfind(prefix, 0) != 0 || key.size() == prefix.size()) {
+        return std::nullopt;
+    }
+    return key.substr(prefix.size());
+}
+
+inline std::optional<Sakura::DockspaceWindow::DockLayout::Direction> ToSakuraDockDirection(const std::string& direction) {
     if (direction == "left") {
-        return Sakura::DockLayout::Direction::Left;
+        return Sakura::DockspaceWindow::DockLayout::Direction::Left;
     }
     if (direction == "right") {
-        return Sakura::DockLayout::Direction::Right;
+        return Sakura::DockspaceWindow::DockLayout::Direction::Right;
     }
     if (direction == "up") {
-        return Sakura::DockLayout::Direction::Up;
+        return Sakura::DockspaceWindow::DockLayout::Direction::Up;
     }
     if (direction == "down") {
-        return Sakura::DockLayout::Direction::Down;
+        return Sakura::DockspaceWindow::DockLayout::Direction::Down;
     }
     return std::nullopt;
 }
 
-inline std::optional<std::string> ToStackDockDirection(const Sakura::DockLayout::Direction direction) {
+inline std::optional<std::string> ToStackDockDirection(const Sakura::DockspaceWindow::DockLayout::Direction direction) {
     switch (direction) {
-        case Sakura::DockLayout::Direction::Left: return "left";
-        case Sakura::DockLayout::Direction::Right: return "right";
-        case Sakura::DockLayout::Direction::Up: return "up";
-        case Sakura::DockLayout::Direction::Down: return "down";
+        case Sakura::DockspaceWindow::DockLayout::Direction::Left: return "left";
+        case Sakura::DockspaceWindow::DockLayout::Direction::Right: return "right";
+        case Sakura::DockspaceWindow::DockLayout::Direction::Up: return "up";
+        case Sakura::DockspaceWindow::DockLayout::Direction::Down: return "down";
     }
     return std::nullopt;
 }
 
-inline std::optional<Sakura::DockLayout> ToSakuraDockLayout(const StackDockLayoutMeta& meta) {
-    Sakura::DockLayout layout;
+inline std::optional<Sakura::DockspaceWindow::DockLayout> ToSakuraDockLayout(const StackDockLayoutMeta& meta) {
+    Sakura::DockspaceWindow::DockLayout layout;
     if (meta.direction.has_value()) {
         layout.direction = ToSakuraDockDirection(*meta.direction);
     }
     layout.ratio = meta.ratio;
 
-    std::vector<Sakura::DockItem> items;
+    std::vector<Sakura::DockspaceWindow::DockItem> items;
     if (meta.flowgraphs.has_value()) {
         for (const auto& flowgraph : *meta.flowgraphs) {
             items.push_back({.key = "flowgraph", .order = flowgraph.order});
@@ -90,12 +105,23 @@ inline std::optional<Sakura::DockLayout> ToSakuraDockLayout(const StackDockLayou
             });
         }
     }
+    if (meta.configs.has_value()) {
+        for (const auto& config : *meta.configs) {
+            if (config.block.empty()) {
+                continue;
+            }
+            items.push_back({
+                .key = MakeStackConfigItemKey(config.block),
+                .order = config.order,
+            });
+        }
+    }
     if (!items.empty()) {
         layout.items = std::move(items);
     }
 
     if (meta.children.has_value()) {
-        std::vector<Sakura::DockLayout> children;
+        std::vector<Sakura::DockspaceWindow::DockLayout> children;
         for (const auto& child : *meta.children) {
             auto sakuraChild = ToSakuraDockLayout(child);
             if (sakuraChild.has_value()) {
@@ -113,7 +139,7 @@ inline std::optional<Sakura::DockLayout> ToSakuraDockLayout(const StackDockLayou
     return layout;
 }
 
-inline std::optional<StackDockLayoutMeta> ToStackDockLayoutMeta(const Sakura::DockLayout& layout) {
+inline std::optional<StackDockLayoutMeta> ToStackDockLayoutMeta(const Sakura::DockspaceWindow::DockLayout& layout) {
     StackDockLayoutMeta meta;
     if (layout.direction.has_value()) {
         meta.direction = ToStackDockDirection(*layout.direction);
@@ -122,10 +148,19 @@ inline std::optional<StackDockLayoutMeta> ToStackDockLayoutMeta(const Sakura::Do
 
     std::vector<StackDockFlowgraphMeta> flowgraphs;
     std::vector<StackDockSurfaceMeta> surfaces;
+    std::vector<StackDockConfigMeta> configs;
     if (layout.items.has_value()) {
         for (const auto& item : *layout.items) {
             if (item.key == "flowgraph") {
                 flowgraphs.push_back({.order = item.order});
+                continue;
+            }
+
+            if (auto parsedConfig = ParseStackConfigItemKey(item.key); parsedConfig.has_value()) {
+                configs.push_back({
+                    .block = std::move(*parsedConfig),
+                    .order = item.order,
+                });
                 continue;
             }
 
@@ -146,6 +181,9 @@ inline std::optional<StackDockLayoutMeta> ToStackDockLayoutMeta(const Sakura::Do
     if (!surfaces.empty()) {
         meta.surfaces = std::move(surfaces);
     }
+    if (!configs.empty()) {
+        meta.configs = std::move(configs);
+    }
 
     if (layout.children.has_value()) {
         std::vector<StackDockLayoutMeta> children;
@@ -160,7 +198,8 @@ inline std::optional<StackDockLayoutMeta> ToStackDockLayoutMeta(const Sakura::Do
         }
     }
 
-    if (!meta.flowgraphs.has_value() && !meta.surfaces.has_value() && !meta.children.has_value()) {
+    if (!meta.flowgraphs.has_value() && !meta.surfaces.has_value() &&
+        !meta.configs.has_value() && !meta.children.has_value()) {
         return std::nullopt;
     }
     return meta;
@@ -203,7 +242,7 @@ struct StackPresenter {
                                             const std::string& stackId,
                                             const DefaultCompositorState::FlowgraphState::StackWindowState& stack) const {
         const auto enqueue = context.callbacks.enqueueMail;
-        std::optional<Sakura::DockLayout> layout;
+        std::optional<Sakura::DockspaceWindow::DockLayout> layout;
         if (stack.meta.layout.has_value()) {
             layout = ToSakuraDockLayout(*stack.meta.layout);
         }
@@ -217,7 +256,7 @@ struct StackPresenter {
             .dockIntoParent = stack.dockInMainDockspace,
             .restoreLayout = stack.restoreDockLayout,
             .layout = layout,
-            .dockables = buildDockables(flowgraphId, flowgraph),
+            .dockables = buildDockables(flowgraphId, flowgraph, stack.meta.layout),
             .onGeometry = [enqueue, flowgraphId, stackId](Extent2D<F32> position, Extent2D<F32> size) {
                 enqueue(MailSetStackGeometry{
                     .flowgraph = flowgraphId,
@@ -228,7 +267,7 @@ struct StackPresenter {
                     .height = size.y,
                 });
             },
-            .onLayout = [enqueue, flowgraphId, stackId](std::optional<Sakura::DockLayout> layout) {
+            .onLayout = [enqueue, flowgraphId, stackId](std::optional<Sakura::DockspaceWindow::DockLayout> layout) {
                 std::optional<StackDockLayoutMeta> meta;
                 if (layout.has_value()) {
                     meta = ToStackDockLayoutMeta(*layout);
@@ -245,22 +284,37 @@ struct StackPresenter {
         };
     }
 
-    std::vector<Sakura::DockableWindow> buildDockables(const std::string& flowgraphId,
-                                                       const std::shared_ptr<Flowgraph>& flowgraph) const {
-        std::vector<Sakura::DockableWindow> dockables;
+    std::vector<Sakura::DockspaceWindow::DockableWindow> buildDockables(const std::string& flowgraphId,
+                                                                       const std::shared_ptr<Flowgraph>& flowgraph,
+                                                                       const std::optional<StackDockLayoutMeta>& layout) const {
+        std::unordered_map<std::string, std::vector<std::string>> savedSurfaces;
+        if (layout.has_value()) {
+            collectSavedSurfaces(*layout, savedSurfaces);
+        }
+
+        std::vector<Sakura::DockspaceWindow::DockableWindow> dockables;
         dockables.push_back({
             .key = "flowgraph",
             .label = MakeFlowgraphWindowLabel(flowgraphId, flowgraph),
         });
 
-        const auto blocks = flowgraph->blockList();
-        for (const auto& [blockName, blockPtr] : blocks) {
-            if (!blockPtr) {
-                continue;
+        const auto blocks = context.state.flowgraph.blocks.find(flowgraphId);
+        if (blocks == context.state.flowgraph.blocks.end()) {
+            return dockables;
+        }
+
+        for (const auto& [blockName, blockData] : blocks->second) {
+            if (blockData.state == Block::State::Creating || !blockData.interfaceConfigs.empty()) {
+                ConfigMeta configMeta;
+                flowgraph->metadata().get("config", configMeta, blockName);
+                dockables.push_back({
+                    .key = MakeStackConfigItemKey(blockName),
+                    .label = MakeDetachedConfigWindowLabel(flowgraphId, blockName, blockData.title, configMeta),
+                });
             }
 
-            const std::string blockTitle = blockPtr->config().title();
-            for (const auto& surface : blockPtr->surfaces()) {
+            std::unordered_set<std::string> surfaceIds;
+            for (const auto& surface : blockData.surfaces) {
                 if (!surface) {
                     continue;
                 }
@@ -268,18 +322,45 @@ struct StackPresenter {
                     if (!manifest.surface) {
                         continue;
                     }
-                    dockables.push_back({
-                        .key = MakeStackSurfaceItemKey(blockName, manifest.id),
-                        .label = MakeDetachedSurfaceWindowLabel(flowgraphId,
-                                                                blockName,
-                                                                manifest.id,
-                                                                blockTitle),
-                    });
+                    surfaceIds.insert(manifest.id);
                 }
+            }
+            if (const auto saved = savedSurfaces.find(blockName); saved != savedSurfaces.end()) {
+                surfaceIds.insert(saved->second.begin(), saved->second.end());
+            }
+
+            for (const auto& surfaceId : surfaceIds) {
+                SurfaceMeta surfaceMeta;
+                flowgraph->metadata().get("surface_" + surfaceId, surfaceMeta, blockName);
+                dockables.push_back({
+                    .key = MakeStackSurfaceItemKey(blockName, surfaceId),
+                    .label = MakeDetachedSurfaceWindowLabel(flowgraphId,
+                                                            blockName,
+                                                            surfaceId,
+                                                            blockData.title,
+                                                            surfaceMeta),
+                });
             }
         }
 
         return dockables;
+    }
+
+    static void collectSavedSurfaces(const StackDockLayoutMeta& layout,
+                                     std::unordered_map<std::string, std::vector<std::string>>& surfaces) {
+        if (layout.surfaces.has_value()) {
+            for (const auto& surface : *layout.surfaces) {
+                if (!surface.block.empty() && !surface.surface.empty()) {
+                    surfaces[surface.block].push_back(surface.surface);
+                }
+            }
+        }
+        if (!layout.children.has_value()) {
+            return;
+        }
+        for (const auto& child : *layout.children) {
+            collectSavedSurfaces(child, surfaces);
+        }
     }
 };
 

@@ -7,7 +7,7 @@
 namespace Jetstream::Render {
 
 template<>
-class DrawImp<DeviceType::WebGPU> : public Draw {
+class JETSTREAM_API DrawImp<DeviceType::WebGPU> : public Draw {
  public:
     explicit DrawImp(const Config& config);
 
@@ -35,9 +35,6 @@ class DrawImp<DeviceType::WebGPU> : public Draw {
     };
 
     std::shared_ptr<VertexImp<DeviceType::WebGPU>> buffer;
-
-    std::shared_ptr<BufferImp<DeviceType::WebGPU>> indexedIndirectBuffer;
-    std::shared_ptr<BufferImp<DeviceType::WebGPU>> indirectBuffer;
 
     std::vector<std::vector<WGPUVertexAttribute>> attributeDescription;
     std::vector<WGPUVertexBufferLayout> vertexLayouts;

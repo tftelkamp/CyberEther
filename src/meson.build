@@ -7,6 +7,7 @@ subdir('domains')
 subdir('platform')
 subdir('compositor')
 subdir('superluminal')
+subdir('runtime')
 
 if jst_is_browser
     src_lst += files('run_browser.cc')
@@ -20,6 +21,9 @@ endif
 
 src_lst += files([
     'flowgraph.cc',
+    'flowgraph_metadata.cc',
+    'flowgraph_environment.cc',
+    'flowgraph_view.cc',
     'settings.cc',
     'parser_map.cc',
     'parser_decode.cc',
@@ -37,24 +41,17 @@ src_lst += files([
     'module_surface.cc',
     'block.cc',
     'block_impl.cc',
+    'block_context.cc',
     'block_interface.cc',
     'registry.cc',
     'plugin.cc',
     'benchmark.cc',
     'testing.cc',
+    'updater.cc',
+    'feedback.cc',
     'compositor.cc',
     'compositor_impl.cc',
-    'runtime.cc',
-    'runtime_impl_native_cpu.cc',
-    'runtime_context_native_cpu.cc',
     'scheduler.cc',
     'scheduler_context.cc',
     'scheduler_synchronous.cc',
 ])
-
-if cfg_lst.get('JETSTREAM_BACKEND_CUDA_AVAILABLE', false)
-    src_lst += files([
-        'runtime_impl_native_cuda.cc',
-        'runtime_context_native_cuda.cc',
-    ])
-endif

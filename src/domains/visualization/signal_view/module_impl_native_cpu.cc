@@ -1,0 +1,201 @@
+#include <algorithm>
+#include <cmath>
+
+#include <jetstream/runtime_context_native_cpu.hh>
+#include <jetstream/scheduler_context.hh>
+#include <jetstream/module_context.hh>
+#include <jetstream/registry.hh>
+
+#include "module_impl.hh"
+
+namespace Jetstream::Modules {
+
+struct SignalViewImplNativeCpu : public SignalViewImpl,
+                                 public NativeCpuRuntimeContext,
+                                 public Scheduler::Context {
+ public:
+    Result validate() final;
+    Result create() final;
+
+    Result presentInitialize() override;
+    Result presentSubmit() override;
+    Result computeSubmit() override;
+
+    Buffer::Config renderStateBufferConfig() const override;
+
+ private:
+    Tensor sums;
+    Tensor lineplotAveragingBuffer;
+    Tensor waterfallAveragingBuffer;
+};
+
+Result SignalViewImplNativeCpu::validate() {
+    JST_CHECK(SignalViewImpl::validate());
+
+    if (!inputs().contains("signal")) {
+        return Result::SUCCESS;
+    }
+
+    const Tensor& inputTensor = inputs().at("signal").tensor;
+    if (!inputTensor.validShape() || inputTensor.size() == 0) {
+        return Result::SUCCESS;
+    }
+
+    if (inputTensor.dtype() != DataType::F32) {
+        JST_ERROR("[MODULE_SIGNAL_VIEW_NATIVE_CPU] Unsupported input data type: {}.",
+                  inputTensor.dtype());
+        return Result::ERROR;
+    }
+
+    return Result::SUCCESS;
+}
+
+Result SignalViewImplNativeCpu::create() {
+    // Create parent.
+
+    JST_CHECK(SignalViewImpl::create());
+
+    if (lineplotEnabled) {
+        JST_CHECK(sums.create(DeviceType::CPU, DataType::F32, {numberOfElements}));
+        JST_CHECK(lineplotAveragingBuffer.create(DeviceType::CPU,
+                                                 DataType::F32,
+                                                 {numberOfElements}));
+
+        detail::InitializeLineplotPoints(
+            static_cast<F32*>(signalPoints.data()),
+            static_cast<F32*>(maxHoldPoints.data()),
+            numberOfElements);
+    }
+
+    if (waterfallEnabled) {
+        JST_CHECK(waterfallAveragingBuffer.create(DeviceType::CPU,
+                                                  DataType::F64,
+                                                  {numberOfElements}));
+    }
+
+    return Result::SUCCESS;
+}
+
+Result SignalViewImplNativeCpu::presentInitialize() {
+    return createPresent();
+}
+
+Buffer::Config SignalViewImplNativeCpu::renderStateBufferConfig() const {
+    return {};
+}
+
+Result SignalViewImplNativeCpu::presentSubmit() {
+    return present();
+}
+
+Result SignalViewImplNativeCpu::computeSubmit() {
+    const F32* inputData = static_cast<const F32*>(input.data());
+
+    bool updateMaxHold = false;
+    if (lineplotEnabled) {
+        F32* sumsData = static_cast<F32*>(sums.data());
+        F32* avgData = static_cast<F32*>(lineplotAveragingBuffer.data());
+        F32* signalData = static_cast<F32*>(signalPoints.data());
+
+        std::fill_n(sumsData, numberOfElements, 0.0f);
+
+        for (U64 b = 0; b < numberOfBatches; b++) {
+            for (U64 i = 0; i < numberOfElements; i++) {
+                const F32 value = inputData[b * inputBatchStride + i * inputElementStride];
+                sumsData[i] += std::isfinite(value) ? value : (value > 0.0f ? 1.0f : 0.0f);
+            }
+        }
+
+        updateMaxHold =
+            maxHold && detail::LineplotMaxHoldReady(maxHoldWarmupBlocks, lineplotAveraging);
+        F32* maxData =
+            updateMaxHold ? static_cast<F32*>(maxHoldPoints.data()) : nullptr;
+
+        for (U64 i = 0; i < numberOfElements; i++) {
+            F32 amplitude = (sumsData[i] * normalizationFactor) - 1.0f;
+            if (!std::isfinite(amplitude)) {
+                amplitude = std::fmin(std::fmax(amplitude, -1.0f), 1.0f);
+            }
+
+            auto& average = avgData[i];
+            if (!lineplotAveragingInitialized || !std::isfinite(average)) {
+                average = amplitude;
+            } else {
+                average -= average / lineplotAveraging;
+                average += amplitude / lineplotAveraging;
+            }
+
+            const F32 displayed = std::tanh(2.0f * average);
+            signalData[(i * 2) + 1] = displayed;
+
+            if (maxData) {
+                auto& maxVal = maxData[(i * 2) + 1];
+                if (displayed > maxVal) { maxVal = displayed; }
+            }
+        }
+        lineplotAveragingInitialized = true;
+
+        if (maxHold && maxHoldWarmupBlocks < lineplotAveraging) {
+            ++maxHoldWarmupBlocks;
+        }
+
+        updateSignalPointsFlag = true;
+        if (updateMaxHold) { updateHoldPointsFlag = true; }
+    }
+
+    if (waterfallEnabled) {
+        const auto averagePlan = PlanWaterfallAveraging(waterfallAveragingCount,
+                                                        numberOfBatches, waterfallAveraging);
+        const auto plan = PlanWaterfallWrite(waterfallHistory.writeIndex,
+                                             averagePlan.rowCount,
+                                             waterfallHeight);
+        F32* waterfallData = static_cast<F32*>(waterfallBins.data());
+
+        if (waterfallAveraging > 1) {
+            F64* sumsData = waterfallAveragingBuffer.data<F64>();
+            U64 pendingRows = waterfallAveragingCount;
+            U64 outputRow = 0;
+            for (U64 batch = 0; batch < numberOfBatches; ++batch) {
+                if (pendingRows == 0) {
+                    std::fill_n(sumsData, numberOfElements, 0.0);
+                }
+                for (U64 element = 0; element < numberOfElements; ++element) {
+                    const F32 value = inputData[batch * inputBatchStride + element * inputElementStride];
+                    sumsData[element] += std::isfinite(value) ? value : (value > 0.0f ? 1.0f : 0.0f);
+                }
+                if (++pendingRows == waterfallAveraging) {
+                    if (outputRow >= plan.sourceRow) {
+                        const U64 destinationRow =
+                            (waterfallHistory.writeIndex + outputRow % waterfallHeight) % waterfallHeight;
+                        for (U64 element = 0; element < numberOfElements; ++element) {
+                            waterfallData[destinationRow * numberOfElements + element] =
+                                static_cast<F32>(sumsData[element] / static_cast<F64>(waterfallAveraging));
+                        }
+                    }
+                    pendingRows = 0;
+                    ++outputRow;
+                }
+            }
+        } else {
+            for (U64 row = 0; row < plan.rowCount; ++row) {
+                const U64 sourceBatch = plan.sourceRow + row;
+                const U64 destinationBatch =
+                    (plan.destinationRow + row) % waterfallHeight;
+                for (U64 element = 0; element < numberOfElements; ++element) {
+                    const F32 value = inputData[sourceBatch * inputBatchStride + element * inputElementStride];
+                    waterfallData[destinationBatch * numberOfElements + element] =
+                        std::isfinite(value) ? value : (value > 0.0f ? 1.0f : 0.0f);
+                }
+            }
+        }
+
+        waterfallAveragingCount = averagePlan.pendingRows;
+        waterfallHistory.advance(averagePlan.rowCount, waterfallHeight);
+    }
+
+    return Result::SUCCESS;
+}
+
+JST_REGISTER_MODULE(SignalViewImplNativeCpu, DeviceType::CPU, RuntimeType::NATIVE, "generic");
+
+}  // namespace Jetstream::Modules

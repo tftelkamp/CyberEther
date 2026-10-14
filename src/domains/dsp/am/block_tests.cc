@@ -20,9 +20,23 @@ TEST_CASE_METHOD(FlowgraphFixture,
     inputs["signal"].requested("src", "signal");
 
     REQUIRE(flowgraph->blockCreate("am", "am", {}, inputs) == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("am")->state() == Block::State::Created);
+    REQUIRE(viewBlock("am").state == Block::State::Created);
 
-    const Tensor& out = flowgraph->blockList().at("am")->outputs().at("signal").tensor;
+    const Tensor out = viewBlock("am").outputs.at("signal").tensor;
     REQUIRE(out.dtype() == DataType::F32);
     REQUIRE(out.shape(0) == 256);
+}
+
+TEST_CASE_METHOD(FlowgraphFixture,
+                 "AM block delegates input type validation to its module",
+                 "[modules][dsp][am][block][validation]") {
+    REQUIRE(flowgraph->blockCreate("am_bad_src", "signal_generator", {}, {}) ==
+            Result::SUCCESS);
+
+    TensorMap inputs;
+    inputs["signal"].requested("am_bad_src", "signal");
+
+    REQUIRE(flowgraph->blockCreate("am_bad", "am", {}, inputs) == Result::SUCCESS);
+    REQUIRE(viewBlock("am_bad").state == Block::State::Errored);
+    REQUIRE(viewBlock("am_bad").outputs.empty());
 }

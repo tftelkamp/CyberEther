@@ -1,0 +1,29 @@
+if not py.found()
+    error('Python is required to generate the runtime Python bridge header.')
+endif
+
+runtime_python_bridge = custom_target(
+    'runtime_python_bridge',
+    input: files([
+        'console.py',
+        'convert.py',
+        'tensor.py',
+        'environment.py',
+        'metrics.py',
+        'bridge.py',
+        'runtime.py',
+    ]),
+    output: 'bridge.hh',
+    command: [
+        py,
+        runtime_python_embed_script,
+        '@OUTPUT@',
+        'kPythonBridge',
+        'bridge/prelude',
+        '@INPUT@',
+    ],
+)
+
+dep_lst += declare_dependency(
+    sources: runtime_python_bridge,
+)

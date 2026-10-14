@@ -1,13 +1,12 @@
 #ifndef JETSTREAM_COMPOSITOR_IMPL_DEFAULT_VIEWS_FLOWGRAPH_METRICS_TABLE_HH
 #define JETSTREAM_COMPOSITOR_IMPL_DEFAULT_VIEWS_FLOWGRAPH_METRICS_TABLE_HH
 
+#include "error.hh"
 #include "types.hh"
-
-#include <sstream>
 
 namespace Jetstream {
 
-struct FlowgraphMetricTable : public Sakura::Component {
+struct FlowgraphMetricTable {
     using Config = FlowgraphMetricConfig;
 
     void update(Config config) {
@@ -28,7 +27,6 @@ struct FlowgraphMetricTable : public Sakura::Component {
         error.update({
             .id = this->config.id + "Error",
             .str = errorText,
-            .tone = Sakura::Text::Tone::Warning,
         });
     }
 
@@ -44,54 +42,39 @@ struct FlowgraphMetricTable : public Sakura::Component {
 
  private:
     void parseValue() {
-        errorText.clear();
         if (!config.value.has_value()) {
-            errorText = "No metric";
+            errorText = "No metric.";
             columns.clear();
             rows.clear();
-            parsedValue.clear();
+            parsedValue.reset();
             return;
         }
 
-        std::string value;
-        try {
-            value = std::any_cast<std::string>(config.value);
-        } catch (const std::bad_any_cast&) {
-            errorText = "Invalid metric type";
+        const auto* value = std::any_cast<Parser::Map>(&config.value);
+        if (!value) {
+            errorText = "Invalid metric type.";
             columns.clear();
             rows.clear();
-            parsedValue.clear();
+            parsedValue.reset();
             return;
         }
 
-        if (value == parsedValue) {
+        if (parsedValue && *value == *parsedValue) {
             return;
         }
 
-        parsedValue = value;
+        parsedValue = *value;
+        errorText.clear();
         columns.clear();
         rows.clear();
-
-        std::istringstream stream(value);
-        std::string line;
-        while (std::getline(stream, line)) {
-            if (line.empty()) continue;
-
-            std::vector<std::string> cols;
-            std::istringstream lineStream(line);
-            std::string cell;
-            while (std::getline(lineStream, cell, '\t')) {
-                cols.push_back(cell);
-            }
-
-            if (cols.empty()) {
-                continue;
-            }
-            if (columns.empty()) {
-                columns = std::move(cols);
-            } else {
-                rows.push_back(std::move(cols));
-            }
+        if (Parser::Deserialize(*value, "columns", columns) != Result::SUCCESS ||
+            Parser::Deserialize(*value, "rows", rows) != Result::SUCCESS) {
+            errorText = "Invalid table data.";
+            return;
+        }
+        if (std::any_of(rows.begin(), rows.end(), [&](const auto& row) { return row.size() != columns.size(); })) {
+            errorText = "Invalid table row size.";
+            return;
         }
 
         if (columns.empty()) {
@@ -100,12 +83,12 @@ struct FlowgraphMetricTable : public Sakura::Component {
     }
 
     Config config;
-    std::string parsedValue;
+    std::optional<Parser::Map> parsedValue;
     std::vector<std::string> columns;
     std::vector<std::vector<std::string>> rows;
     std::string errorText;
     Sakura::NodeField frame;
-    Sakura::NodeLabel error;
+    FlowgraphMetricError error;
     Sakura::NodeTable table;
 };
 

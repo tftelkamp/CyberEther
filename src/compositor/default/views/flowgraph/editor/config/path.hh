@@ -3,11 +3,9 @@
 
 #include "types.hh"
 
-// TODO: Cleanup parsing.
-
 namespace Jetstream {
 
-struct FlowgraphConfigPathField : public Sakura::Component {
+struct FlowgraphConfigPathField {
     using Config = FlowgraphConfigFieldConfig;
 
     enum class Mode {
@@ -15,15 +13,13 @@ struct FlowgraphConfigPathField : public Sakura::Component {
         Save,
     };
 
-    void update(Config config) {
+    Result update(Config config) {
         this->config = std::move(config);
         if (this->config.format != parsedFormat) {
             parseFormat();
         }
-        if (this->config.encoded != parsedEncoded) {
-            value = this->config.encoded;
-            parsedEncoded = this->config.encoded;
-        }
+        value.clear();
+        JST_CHECK(Parser::Deserialize(this->config.values, this->config.name, value));
         frame.update({
             .id = this->config.id,
             .label = this->config.label,
@@ -33,16 +29,17 @@ struct FlowgraphConfigPathField : public Sakura::Component {
             .id = this->config.id + "Path",
             .value = value,
             .onChange = [this](const std::string& nextValue) {
-                auto values = this->config.values;
-                values[this->config.name] = nextValue;
+                Parser::Map patch;
+                patch[this->config.name] = nextValue;
                 if (this->config.onApply) {
-                    this->config.onApply(std::move(values), false);
+                    this->config.onApply(std::move(patch), false);
                 }
             },
             .onBrowse = [this]() {
                 browse();
             },
         });
+        return Result::SUCCESS;
     }
 
     void render(const Sakura::Context& ctx) const {
@@ -54,21 +51,17 @@ struct FlowgraphConfigPathField : public Sakura::Component {
  private:
     void parseFormat() {
         parsedFormat = config.format;
-        extensions.clear();
-        const auto parts = Parser::SplitString(config.format, ":");
-        mode = parts.empty() || parts[0] != "filesave" ? Mode::Open : Mode::Save;
-        if (parts.size() > 1 && !parts[1].empty()) {
-            extensions = Parser::SplitString(parts[1], ",");
-        }
+        mode = Parser::Get<std::string>(config.format, "type") == "filesave" ? Mode::Save : Mode::Open;
+        extensions = Parser::Get<std::vector<std::string>>(config.format, "extensions");
     }
 
     void browse() const {
-        auto applyPath = [values = config.values,
-                          name = config.name,
+        auto applyPath = [name = config.name,
                           onApply = config.onApply](std::string path) mutable {
-            values[name] = std::move(path);
+            Parser::Map patch;
+            patch[name] = std::move(path);
             if (onApply) {
-                onApply(std::move(values), false);
+                onApply(std::move(patch), false);
             }
         };
 
@@ -79,8 +72,7 @@ struct FlowgraphConfigPathField : public Sakura::Component {
     }
 
     Config config;
-    std::string parsedFormat;
-    std::string parsedEncoded;
+    Parser::Map parsedFormat;
     std::vector<std::string> extensions;
     std::string value;
     Mode mode = Mode::Open;

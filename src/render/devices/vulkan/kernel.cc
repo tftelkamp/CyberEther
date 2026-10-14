@@ -20,6 +20,18 @@ Result Implementation::create() {
     auto& backend = Backend::State<DeviceType::Vulkan>();
     auto device = backend->getDevice();
 
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(backend->getPhysicalDevice(), &properties);
+    const U64 threads = std::get<0>(config.gridSize);
+    if (config.workgroupSize == 0 ||
+        config.workgroupSize > properties.limits.maxComputeWorkGroupSize[0] ||
+        config.workgroupSize > properties.limits.maxComputeWorkGroupInvocations ||
+        threads / config.workgroupSize + (threads % config.workgroupSize != 0) >
+            properties.limits.maxComputeWorkGroupCount[0]) {
+        JST_ERROR("[VULKAN] Render kernel workgroup size or count exceeds device limits.");
+        return Result::ERROR;
+    }
+
     // Load kernel from buffers. 
 
     if (config.kernels.contains(DeviceType::Vulkan) == 0) {
@@ -123,9 +135,7 @@ Result Implementation::create() {
 
     vkDestroyShaderModule(device, kernelModule, nullptr);
 
-    // Set update flag.
-
-    this->updated = true;
+    update();
 
     return Result::SUCCESS;
 }
@@ -149,10 +159,9 @@ Result Implementation::destroy() {
 Result Implementation::encode(VkCommandBuffer& commandBuffer) {
     // Check if data needs to be updated.
 
-    if (!this->updated) {
+    if (!shouldEncode()) {
         return Result::SUCCESS;
     }
-    this->updated = false;
 
     // Bind buffers.
 
@@ -173,7 +182,10 @@ Result Implementation::encode(VkCommandBuffer& commandBuffer) {
         return Result::ERROR;
     }
 
-    vkCmdDispatch(commandBuffer, x, y, z);
+    const U64 groups = x / config.workgroupSize + (x % config.workgroupSize != 0);
+    vkCmdDispatch(commandBuffer, groups, y, z);
+
+    markScheduled();
 
     return Result::SUCCESS;
 }

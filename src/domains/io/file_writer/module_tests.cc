@@ -1,21 +1,20 @@
 #include <catch2/catch_test_macros.hpp>
-#include <chrono>
 #include <filesystem>
+
+#include "jetstream/platform.hh"
 #include <fstream>
-#include <thread>
 
 #include "jetstream/testing.hh"
 #include "jetstream/registry.hh"
 #include "jetstream/domains/io/file_writer/module.hh"
-
-#include "module_impl.hh"
 
 using namespace Jetstream;
 
 namespace {
 
 std::filesystem::path getTestFilePath(const std::string& suffix) {
-    auto path = std::filesystem::temp_directory_path() / ("jst_test_file_writer_" + suffix + ".raw");
+    auto path = std::filesystem::temp_directory_path() /
+                Platform::PathFromUtf8("jst_test_file_writer_" + suffix + ".raw");
     return path;
 }
 
@@ -29,6 +28,27 @@ void cleanupTestDirectory(const std::filesystem::path& path) {
     if (std::filesystem::exists(path)) {
         std::filesystem::remove_all(path);
     }
+}
+
+void requireFileWriterDtypeValidationError(const Registry::ModuleRegistration& impl,
+                                           const std::filesystem::path& path) {
+    Tensor input;
+    REQUIRE(input.create(impl.device, DataType::I32, {4}) == Result::SUCCESS);
+
+    TensorMap inputs;
+    inputs["buffer"].requested("test", "buffer");
+    inputs["buffer"].tensor = input;
+
+    Modules::FileWriter config;
+    config.filepath = Platform::PathToUtf8(path);
+    config.overwrite = true;
+    config.recording = true;
+
+    std::shared_ptr<Module> module;
+    REQUIRE(Registry::BuildModule("file_writer", impl.device, impl.runtime,
+                                  impl.provider, module) == Result::SUCCESS);
+    REQUIRE(module->create("test", config, inputs) == Result::ERROR);
+    REQUIRE(module->state() == Module::State::ERRORED);
 }
 
 template<typename T>
@@ -47,7 +67,7 @@ void expectFileWriterSuccess(const std::string& suffix,
                             impl.runtime, impl.provider);
 
             Modules::FileWriter config;
-            config.filepath = testPath.string();
+            config.filepath = Platform::PathToUtf8(testPath);
             config.overwrite = true;
             config.recording = true;
             ctx.setConfig(config);
@@ -138,7 +158,7 @@ TEST_CASE("FileWriter Module - No overwrite protection",
                            impl.runtime, impl.provider);
 
             Modules::FileWriter config;
-            config.filepath = testPath.string();
+            config.filepath = Platform::PathToUtf8(testPath);
 
             config.overwrite = false;
             config.recording = true;
@@ -172,7 +192,7 @@ TEST_CASE("FileWriter Module - Missing parent directory",
                             impl.runtime, impl.provider);
 
             Modules::FileWriter config;
-            config.filepath = testPath.string();
+            config.filepath = Platform::PathToUtf8(testPath);
             config.overwrite = true;
             config.recording = true;
             ctx.setConfig(config);
@@ -203,7 +223,7 @@ TEST_CASE("FileWriter Module - Recording disabled",
                             impl.runtime, impl.provider);
 
             Modules::FileWriter config;
-            config.filepath = testPath.string();
+            config.filepath = Platform::PathToUtf8(testPath);
             config.overwrite = true;
             config.recording = false;
             ctx.setConfig(config);
@@ -252,19 +272,27 @@ TEST_CASE("FileWriter Module - Unsupported input dtype",
             const auto testPath = getTestFilePath("bad_dtype");
             cleanupTestFile(testPath);
 
-            TestContext ctx("file_writer", impl.device,
-                            impl.runtime, impl.provider);
+            requireFileWriterDtypeValidationError(impl, testPath);
+            REQUIRE(!std::filesystem::exists(testPath));
 
-            Modules::FileWriter config;
-            config.filepath = testPath.string();
-            config.overwrite = true;
-            config.recording = true;
-            ctx.setConfig(config);
+            const std::string existingData = "existing file contents";
+            {
+                std::ofstream file(testPath, std::ios::binary);
+                file.write(existingData.data(),
+                           static_cast<std::streamsize>(existingData.size()));
+            }
+            REQUIRE(std::filesystem::file_size(testPath) == existingData.size());
 
-            auto input = ctx.createTensor<I32>({4});
-            ctx.setInput("buffer", input);
+            requireFileWriterDtypeValidationError(impl, testPath);
+            REQUIRE(std::filesystem::file_size(testPath) == existingData.size());
 
-            REQUIRE(ctx.run() == Result::ERROR);
+            {
+                std::ifstream verify(testPath, std::ios::binary);
+                std::string actualData(existingData.size(), '\0');
+                verify.read(actualData.data(),
+                            static_cast<std::streamsize>(actualData.size()));
+                REQUIRE(actualData == existingData);
+            }
 
             cleanupTestFile(testPath);
         }
@@ -286,7 +314,7 @@ TEST_CASE("FileWriter Module - Multiple runs overwrite with latest buffer",
                             impl.runtime, impl.provider);
 
             Modules::FileWriter config;
-            config.filepath = testPath.string();
+            config.filepath = Platform::PathToUtf8(testPath);
             config.overwrite = true;
             config.recording = true;
             ctx.setConfig(config);
@@ -314,64 +342,6 @@ TEST_CASE("FileWriter Module - Multiple runs overwrite with latest buffer",
             REQUIRE(values[1] == 50);
             REQUIRE(values[2] == 60);
             verify.close();
-
-            cleanupTestFile(testPath);
-        }
-    }
-}
-
-TEST_CASE("FileWriter Module - Current bandwidth updates after a write",
-          "[modules][file_writer][state]") {
-    auto implementations = Registry::ListAvailableModules("file_writer");
-    REQUIRE(!implementations.empty());
-
-    for (const auto& impl : implementations) {
-        DYNAMIC_SECTION("Device: " << impl.device
-                        << " Runtime: " << impl.runtime) {
-            const auto testPath = getTestFilePath("bandwidth");
-            cleanupTestFile(testPath);
-
-            std::shared_ptr<Module> module;
-            REQUIRE(Registry::BuildModule("file_writer",
-                                          impl.device,
-                                          impl.runtime,
-                                          impl.provider,
-                                          module) == Result::SUCCESS);
-
-            TypedTensor<U8> cpuInput(DeviceType::CPU, {4096});
-            for (U64 i = 0; i < cpuInput.shape(0); ++i) {
-                cpuInput.at(i) = static_cast<U8>(i & 0xFF);
-            }
-
-            Modules::FileWriter config;
-            config.filepath = testPath.string();
-            config.overwrite = true;
-            config.recording = true;
-
-            TensorMap inputs;
-            inputs["buffer"].requested("test", "buffer");
-            if (impl.device == DeviceType::CPU) {
-                inputs["buffer"].tensor = cpuInput;
-            } else {
-                inputs["buffer"].tensor = Tensor(impl.device, cpuInput);
-            }
-
-            REQUIRE(module->create("test", config, inputs) == Result::SUCCESS);
-
-            Runtime runtime("test", impl.device, impl.runtime);
-            REQUIRE(runtime.create({{"test", module}}) == Result::SUCCESS);
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(120));
-
-            std::unordered_set<std::string> skippedModules;
-            REQUIRE(runtime.compute({}, skippedModules) == Result::SUCCESS);
-
-            auto* moduleImpl = module->getImpl<Modules::FileWriterImpl>();
-            REQUIRE(moduleImpl != nullptr);
-            REQUIRE(moduleImpl->getCurrentBandwidth() > 0.0f);
-
-            REQUIRE(runtime.destroy() == Result::SUCCESS);
-            REQUIRE(module->destroy() == Result::SUCCESS);
 
             cleanupTestFile(testPath);
         }

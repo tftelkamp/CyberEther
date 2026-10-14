@@ -4,7 +4,7 @@ namespace Jetstream {
 
 void Compositor::Impl::startWorker() {
     workerRunning = true;
-    workerThread = std::thread([this]() {
+    workerThread.start([this]() {
         while (true) {
             Command cmd;
             {
@@ -21,6 +21,7 @@ void Compositor::Impl::startWorker() {
                 commandPendingQueue.pop();
             }
 
+            // TODO: Capture command-local diagnostics without clearing global logger state.
             cmd.result = cmd.fn();
 
             if (cmd.result == Result::ERROR ||
@@ -55,13 +56,19 @@ void Compositor::Impl::stopWorker() {
     }
 }
 
-void Compositor::Impl::enqueue(std::function<Result()> fn, bool silent) {
+void Compositor::Impl::enqueue(std::function<Result()> fn,
+                               bool silent,
+                               std::function<void(Result)> onComplete) {
     std::lock_guard<std::mutex> lock(commandPendingQueueMutex);
     if (!workerRunning) {
         return;
     }
 
-    commandPendingQueue.push({std::move(fn), silent});
+    commandPendingQueue.push({
+        .fn = std::move(fn),
+        .silent = silent,
+        .onComplete = std::move(onComplete),
+    });
     commandQueueNotEmpty.notify_one();
 }
 

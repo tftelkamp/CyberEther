@@ -2,10 +2,12 @@
 #define JETSTREAM_BLOCK_IMPL_HH
 
 #include <any>
+#include <atomic>
 #include <functional>
 #include <unordered_map>
 
 #include "jetstream/block.hh"
+#include "jetstream/block_context.hh"
 #include "jetstream/block_interface.hh"
 #include "jetstream/module_surface.hh"
 #include "jetstream/registry.hh"
@@ -30,7 +32,7 @@ class DynamicConfig : public ConfigType {
 };
 #endif  // JETSTREAM_DYNAMIC_CONFIG_DEFINED
 
-struct Block::Impl {
+struct JETSTREAM_API Block::Impl {
  public:
     virtual ~Impl() = default;
 
@@ -42,6 +44,7 @@ struct Block::Impl {
     virtual Result define();
     virtual Result create();
     virtual Result destroy();
+    virtual Result reconfigure();
 
     // Identity
 
@@ -64,18 +67,24 @@ struct Block::Impl {
     Result defineInterfaceConfig(const std::string& key,
                                  const std::string& label,
                                  const std::string& help,
-                                 const std::string& format);
+                                 const Parser::Map& format);
+    Result updateInterfaceConfigFormat(const std::string& key,
+                                       const Parser::Map& format);
     Result defineInterfaceMetric(const std::string& key,
                                  const std::string& label,
                                  const std::string& help,
-                                 const std::string& format,
+                                 const Parser::Map& format,
                                  std::function<std::any()> metric);
 
     // Components
 
-    std::shared_ptr<Instance>& instance();
-    std::shared_ptr<Render::Window>& render();
-    std::shared_ptr<Scheduler>& scheduler();
+    const std::shared_ptr<Instance>& instance();
+    const std::shared_ptr<Render::Window>& render();
+    const std::shared_ptr<Scheduler>& scheduler();
+    const std::shared_ptr<Flowgraph::Environment>& environment();
+    const std::shared_ptr<Flowgraph::Environment>& environment() const;
+    const std::shared_ptr<Flowgraph::View>& view();
+    const std::shared_ptr<Flowgraph::View>& view() const;
     const std::vector<std::shared_ptr<Module::Surface>>& surfaces() const;
     const std::vector<std::string>& modules() const;
 
@@ -84,22 +93,29 @@ struct Block::Impl {
     Result moduleCreate(const std::string name,
                         const std::shared_ptr<Module::Config>& config,
                         const TensorMap& inputs);
-    Result moduleDestroy(const std::string name);
+    Result moduleDestroy(const std::string name, bool retainOnFailure = true);
     Result moduleExposeOutput(const std::string blockPort,
                               const std::pair<std::string, std::string>& moduleOutput);
     TensorLink moduleGetOutput(const std::pair<std::string, std::string>& moduleOutput);
     Result moduleReconfigure(const std::string name, const bool& validateOnly = false);
+    Result moduleBindConfigEdit(const std::string& module,
+                                const std::string& moduleKey,
+                                const std::string& blockKey);
     std::shared_ptr<Module> moduleHandle(const std::string& name);
 
  private:
     // Identity
 
     std::string _name;
-    DeviceType _device;
-    RuntimeType _runtime;
+    DeviceType _device = DeviceType::None;
+    RuntimeType _runtime = RuntimeType::NONE;
     ProviderType _provider;
-    Block::State _state;
+    Block::State _state = Block::State::None;
     std::string _diagnostic;
+
+    // Timing
+
+    Result defineModuleTiming();
 
     // I/O
 
@@ -109,9 +125,7 @@ struct Block::Impl {
 
     // Components
 
-    std::shared_ptr<Instance> _instance;
-    std::shared_ptr<Render::Window> _render;
-    std::shared_ptr<Scheduler> _scheduler;
+    std::shared_ptr<Block::Context> _context;
     std::vector<std::shared_ptr<Module::Surface>> _surfaces;
 
     // Modules
@@ -119,6 +133,7 @@ struct Block::Impl {
     struct ModuleEntry {
         std::shared_ptr<Module> module;
         std::shared_ptr<Module::Config> config;
+        bool scheduled = true;
     };
     std::unordered_map<std::string, ModuleEntry> _modules;
     std::vector<std::string> _moduleOrder;
@@ -127,8 +142,10 @@ struct Block::Impl {
 
     std::shared_ptr<Block::Config> _stagedConfig;
     std::shared_ptr<Block::Config> _candidateConfig;
+    std::shared_ptr<std::atomic<bool>> _configChangesPending;
 
     friend class Block;
+    friend class Flowgraph;
 };
 
 }  // namespace Jetstream

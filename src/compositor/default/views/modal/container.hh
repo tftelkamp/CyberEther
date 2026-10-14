@@ -3,16 +3,18 @@
 
 #include "about.hh"
 #include "benchmark.hh"
+#include "dependencies.hh"
 #include "../flowgraph/modals/close.hh"
 #include "../flowgraph/modals/examples.hh"
 #include "../flowgraph/modals/info.hh"
 #include "../flowgraph/modals/rename.hh"
+#include "feedback.hh"
 #include "settings/base.hh"
 #include "plugin.hh"
 #include "../../model/ui.hh"
 #include "remote.hh"
 
-#include "jetstream/render/sakura/sakura.hh"
+#include "jetstream/render/sakura/base.hh"
 
 #include <functional>
 #include <optional>
@@ -20,7 +22,7 @@
 
 namespace Jetstream {
 
-struct ModalView : public Sakura::Component {
+struct ModalView {
     struct Config {
         std::optional<ModalContent> content;
         FlowgraphExamplesView::Config flowgraphExamples;
@@ -31,6 +33,8 @@ struct ModalView : public Sakura::Component {
         BenchmarkView::Config benchmark;
         RemoteView::Config remoteStreaming;
         PluginView::Config plugin;
+        DependencyReviewView::Config dependencies;
+        FeedbackView::Config feedback;
         std::function<void()> onClose;
     };
 
@@ -45,6 +49,11 @@ struct ModalView : public Sakura::Component {
                 }
             },
         });
+
+        if (previousContent == ModalContent::RenameBlock &&
+            this->config.content != ModalContent::RenameBlock) {
+            renameBlockView.update({});
+        }
 
         if (!this->config.content.has_value()) {
             previousContent = this->config.content;
@@ -98,6 +107,16 @@ struct ModalView : public Sakura::Component {
                 pluginView.update(std::move(viewConfig));
                 break;
             }
+            case ModalContent::Dependencies: {
+                auto viewConfig = this->config.dependencies;
+                dependencyReviewView.update(std::move(viewConfig));
+                break;
+            }
+            case ModalContent::Feedback: {
+                auto viewConfig = this->config.feedback;
+                feedbackView.update(std::move(viewConfig));
+                break;
+            }
         }
 
         previousContent = this->config.content;
@@ -143,6 +162,12 @@ struct ModalView : public Sakura::Component {
                 case ModalContent::Plugin:
                     pluginView.render(ctx);
                     break;
+                case ModalContent::Dependencies:
+                    dependencyReviewView.render(ctx);
+                    break;
+                case ModalContent::Feedback:
+                    feedbackView.render(ctx);
+                    break;
             }
         });
     }
@@ -154,6 +179,12 @@ struct ModalView : public Sakura::Component {
         }
         if (config.content == ModalContent::Plugin) {
             return Extent2D<F32>{620.0f, 0.0f};
+        }
+        if (config.content == ModalContent::Feedback) {
+            return Extent2D<F32>{520.0f, 0.0f};
+        }
+        if (config.content == ModalContent::Dependencies) {
+            return Extent2D<F32>{760.0f, 0.0f};
         }
         return std::nullopt;
     }
@@ -170,6 +201,8 @@ struct ModalView : public Sakura::Component {
     BenchmarkView benchmarkView;
     RemoteView remoteView;
     PluginView pluginView;
+    DependencyReviewView dependencyReviewView;
+    FeedbackView feedbackView;
 };
 
 }  // namespace Jetstream

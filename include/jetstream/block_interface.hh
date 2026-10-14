@@ -9,19 +9,22 @@
 #include <vector>
 
 #include "jetstream/block.hh"
+#include "jetstream/parser.hh"
 
 namespace Jetstream {
 
-struct Block::Interface {
+struct JETSTREAM_API Block::Interface {
  public:
     struct Entry {
         std::string label;
-        std::string format;
+        Parser::Map format;
         std::string help;
         std::function<std::any()> metric;
     };
 
     typedef std::vector<std::pair<std::string, Entry>> EntryList;
+
+    static Result ValidateFormat(const Parser::Map& format, bool metric = false);
 
     Interface();
     ~Interface();

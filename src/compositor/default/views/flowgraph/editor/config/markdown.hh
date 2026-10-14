@@ -5,14 +5,23 @@
 
 namespace Jetstream {
 
-struct FlowgraphConfigMarkdownField : public Sakura::Component {
+struct FlowgraphConfigMarkdownField {
     using Config = FlowgraphConfigFieldConfig;
 
-    void update(Config config) {
+    FlowgraphNodeHeightSpec heightSpec() const {
+        return {
+            .policy = FlowgraphNodeHeightPolicy::FillRemaining,
+            .minimum = 120.0f,
+        };
+    }
+
+    Result update(Config config) {
         this->config = std::move(config);
-        if (this->config.encoded != parsedEncoded) {
-            value = this->config.encoded;
-            parsedEncoded = this->config.encoded;
+        std::string nextValue;
+        JST_CHECK(Parser::Deserialize(this->config.values, this->config.name, nextValue));
+        if (nextValue != parsedEncoded) {
+            value = nextValue;
+            parsedEncoded = nextValue;
             if (!editing) {
                 buffer = value;
             }
@@ -24,71 +33,55 @@ struct FlowgraphConfigMarkdownField : public Sakura::Component {
             .title = false,
             .background = false,
         });
-        preview.update({
-            .id = this->config.id + "Preview",
-            .value = value,
-        });
-        editButton.update({
-            .id = this->config.id + "Edit",
-            .str = "Edit",
-            .size = {-1.0f, 0.0f},
-            .colorKey = "card",
-            .hoveredColorKey = "card",
-            .activeColorKey = "card",
-            .onClick = [this]() {
-                buffer = value;
-                editing = true;
-            },
-        });
-        doneButton.update({
-            .id = this->config.id + "Done",
-            .str = "Done",
-            .size = {-1.0f, 0.0f},
-            .colorKey = "card",
-            .hoveredColorKey = "card",
-            .activeColorKey = "card",
-            .onClick = [this]() {
-                auto values = this->config.values;
-                values[this->config.name] = buffer;
-                if (this->config.onApply) {
-                    this->config.onApply(std::move(values), false);
-                }
-                editing = false;
-            },
-        });
-        editor.update({
-            .id = this->config.id + "Editor",
-            .value = buffer,
-            .onChange = [this](std::string nextValue) {
-                buffer = std::move(nextValue);
-            },
-        });
+        updateEditor();
+        return Result::SUCCESS;
+    }
+
+    void setAllocatedHeight(std::optional<F32> height) {
+        allocatedHeight = height;
+        updateEditor();
     }
 
     void render(const Sakura::Context& ctx) const {
         frame.render(ctx, [this](const Sakura::Context& ctx) {
-            if (!editing) {
-                preview.render(ctx);
-                editButton.render(ctx);
-                return;
-            }
-
-            editor.render(ctx);
-            doneButton.render(ctx);
+            markdownField.render(ctx);
         });
     }
 
  private:
+    void updateEditor() {
+        markdownField.update({
+            .id = this->config.id + "Markdown",
+            .value = editing ? buffer : this->config.preview.value_or(value),
+            .editing = editing,
+            .height = allocatedHeight,
+            .onChange = [this](std::string nextValue) {
+                buffer = std::move(nextValue);
+            },
+            .onEdit = [this]() {
+                buffer = value;
+                editing = true;
+            },
+            .onDone = [this]() {
+                Parser::Map patch;
+                patch[this->config.name] = buffer;
+                if (this->config.onApply) {
+                    this->config.onApply(std::move(patch), false);
+                }
+                editing = false;
+            },
+            .onContentOverflow = this->config.onContentOverflow,
+        });
+    }
+
     Config config;
+    std::optional<F32> allocatedHeight;
     std::string parsedEncoded;
     std::string value;
     bool editing = false;
     std::string buffer;
     Sakura::NodeField frame;
-    Sakura::NodeMarkdown preview;
-    Sakura::NodeCodeEditor editor;
-    Sakura::Button editButton;
-    Sakura::Button doneButton;
+    Sakura::Retained::MarkdownEditor markdownField;
 };
 
 }  // namespace Jetstream

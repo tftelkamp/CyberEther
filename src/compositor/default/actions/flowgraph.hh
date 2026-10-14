@@ -7,9 +7,14 @@
 
 #include "jetstream/block.hh"
 #include "jetstream/flowgraph.hh"
+#include "jetstream/flowgraph_metadata.hh"
+#include "jetstream/flowgraph_view.hh"
 #include "jetstream/instance.hh"
 #include "jetstream/platform.hh"
+#include "tools/naming.hh"
+#include "tools/text.hh"
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
@@ -26,13 +31,15 @@ struct FlowgraphActions {
     using Filter = std::tuple<MailNewFlowgraph,
                               MailOpenFlowgraph,
                               MailOpenFlowgraphPath,
+                              MailDropFlowgraphPath,
                               MailOpenFlowgraphBlob,
+                              MailFocusFlowgraph,
                               MailSaveFlowgraph,
                               MailCloseFlowgraph,
                               MailSaveFlowgraphPath,
-                              MailBrowseConfigPath,
                               MailSetFlowgraphInfo,
                               MailCreateBlock,
+                              MailOpenRenameBlock,
                               MailRenameBlock,
                               MailDeleteBlock,
                               MailReloadBlock,
@@ -43,7 +50,8 @@ struct FlowgraphActions {
                               MailCopyBlock,
                               MailPasteBlock,
                               MailSetNodeMeta,
-                              MailSurfaceMouse,
+                              MailSetConfigCollapsed,
+                              MailSurfaceInput,
                               MailResizeSurface>;
 
     DefaultCompositorState& state;
@@ -71,8 +79,13 @@ struct FlowgraphActions {
     Result handle(const MailOpenFlowgraph&) {
         std::string path;
         auto enqueueMail = callbacks.enqueueMail;
-        Platform::PickFile(path, {"yaml", "yml"}, [enqueueMail](std::string p) mutable {
-            enqueueMail(MailOpenFlowgraphPath{std::move(p)});
+        callbacks.requestFile({
+            .mode = FilePickerMode::Open,
+            .initialPath = path,
+            .extensions = {"yaml", "yml"},
+            .callback = [enqueueMail](std::string p) mutable {
+                enqueueMail(MailOpenFlowgraphPath{std::move(p)});
+            },
         });
 
         return Result::SUCCESS;
@@ -84,7 +97,7 @@ struct FlowgraphActions {
             return Result::SUCCESS;
         }
 
-        if (!std::filesystem::exists(msg.path)) {
+        if (!std::filesystem::exists(Platform::PathFromUtf8(msg.path))) {
             callbacks.notify(Sakura::ToastType::Error, 5000, "The selected file does not exist.");
             return Result::SUCCESS;
         }
@@ -102,6 +115,19 @@ struct FlowgraphActions {
 
         state.interface.pendingFocusedFlowgraph = name;
         return Result::SUCCESS;
+    }
+
+    Result handle(const MailDropFlowgraphPath& msg) {
+        const auto extension = Text::ToLower(Platform::PathToUtf8(
+            Platform::PathFromUtf8(msg.path).extension()));
+
+        if (extension != ".yml" && extension != ".yaml") {
+            callbacks.notify(Sakura::ToastType::Warning, 5000,
+                             "Only flowgraph files (.yml or .yaml) can be opened by dropping them here.");
+            return Result::SUCCESS;
+        }
+
+        return handle(MailOpenFlowgraphPath{msg.path});
     }
 
     Result handle(const MailOpenFlowgraphBlob& msg) {
@@ -125,6 +151,14 @@ struct FlowgraphActions {
         return Result::SUCCESS;
     }
 
+    Result handle(const MailFocusFlowgraph& msg) {
+        if (state.flowgraph.items.contains(msg.flowgraph)) {
+            state.interface.focusedFlowgraph = msg.flowgraph;
+        }
+
+        return Result::SUCCESS;
+    }
+
     Result handle(const MailSaveFlowgraph& msg) {
         if (!state.flowgraph.items.contains(msg.flowgraph)) {
             callbacks.notify(Sakura::ToastType::Error,
@@ -137,8 +171,13 @@ struct FlowgraphActions {
         if (path.empty()) {
             std::string pickedPath;
             auto enqueueMail = callbacks.enqueueMail;
-            Platform::SaveFile(pickedPath, [enqueueMail, flowgraph = msg.flowgraph](std::string p) mutable {
-                enqueueMail(MailSaveFlowgraph{.flowgraph = flowgraph, .path = std::move(p)});
+            callbacks.requestFile({
+                .mode = FilePickerMode::Save,
+                .initialPath = pickedPath,
+                .extensions = {"yaml", "yml"},
+                .callback = [enqueueMail, flowgraph = msg.flowgraph](std::string p) mutable {
+                    enqueueMail(MailSaveFlowgraph{.flowgraph = flowgraph, .path = std::move(p)});
+                },
             });
 
             return Result::SUCCESS;
@@ -162,7 +201,8 @@ struct FlowgraphActions {
             return Result::SUCCESS;
         }
 
-        if (!msg.force && state.flowgraph.items.at(msg.flowgraph)->path().empty()) {
+        const auto& flowgraph = state.flowgraph.items.at(msg.flowgraph);
+        if (!msg.force && !flowgraph->view().empty()) {
             state.modal.flowgraph = msg.flowgraph;
             state.modal.content = ModalContent::FlowgraphClose;
             return Result::SUCCESS;
@@ -203,24 +243,6 @@ struct FlowgraphActions {
         return Result::SUCCESS;
     }
 
-    Result handle(const MailBrowseConfigPath& msg) {
-        std::string path = msg.path;
-        const auto callback = [onSelect = msg.onSelect](std::string selectedPath) {
-            if (onSelect) {
-                onSelect(std::move(selectedPath));
-            }
-        };
-
-        const Result result = msg.save
-            ? Platform::SaveFile(path, callback)
-            : Platform::PickFile(path, msg.extensions, callback);
-        if (result != Result::SUCCESS && !Platform::IsFilePending()) {
-            callbacks.notifyResult(result, "");
-        }
-
-        return Result::SUCCESS;
-    }
-
     Result handle(const MailSetFlowgraphInfo& msg) {
         if (!state.flowgraph.items.contains(msg.flowgraph)) {
             JST_ERROR("Failed to update flowgraph info because flowgraph was not found.");
@@ -254,19 +276,15 @@ struct FlowgraphActions {
         }
 
         auto flowgraph = state.flowgraph.items[msg.flowgraph];
-        const auto existingBlocks = flowgraph->blockList();
 
-        std::string baseName = msg.moduleId;
-        std::string blockName = baseName;
-        int suffix = 1;
-        while (existingBlocks.contains(blockName)) {
-            blockName = jst::fmt::format("{}_{}", baseName, suffix++);
-        }
+        const std::string blockName = Naming::UniqueName(msg.moduleId, [&](const std::string& candidate) {
+            return flowgraph->view().has(candidate);
+        });
 
         if (msg.gridPosition.has_value()) {
             const auto& pos = msg.gridPosition.value();
-            const NodeMeta nodeMeta = {pos.x, pos.y, 140.0f, 0.0f};
-            flowgraph->setMeta("node", nodeMeta, blockName);
+            const NodeMeta nodeMeta = {pos.x, pos.y, 0.0f, 0.0f};
+            flowgraph->metadata().set("node", nodeMeta, blockName);
         }
 
         const auto moduleId = msg.moduleId;
@@ -289,8 +307,46 @@ struct FlowgraphActions {
         return Result::SUCCESS;
     }
 
-    Result handle(const MailRenameBlock&) {
-        // TODO: Implement.
+    Result handle(const MailOpenRenameBlock& msg) {
+        if (!state.flowgraph.items.contains(msg.flowgraph)) {
+            callbacks.notify(Sakura::ToastType::Error,
+                             5000,
+                             "Cannot rename block because the flowgraph doesn't exist.");
+            return Result::SUCCESS;
+        }
+
+        if (!state.flowgraph.items.at(msg.flowgraph)->view().has(msg.blockId)) {
+            callbacks.notify(Sakura::ToastType::Error,
+                             5000,
+                             "Cannot rename block because it doesn't exist.");
+            return Result::SUCCESS;
+        }
+
+        state.modal.flowgraph = msg.flowgraph;
+        state.modal.renameBlockOldName = msg.blockId;
+        state.modal.content = ModalContent::RenameBlock;
+        return Result::SUCCESS;
+    }
+
+    Result handle(const MailRenameBlock& msg) {
+        if (!state.flowgraph.items.contains(msg.flowgraph)) {
+            callbacks.notify(Sakura::ToastType::Error,
+                             5000,
+                             "Cannot rename block because the flowgraph doesn't exist.");
+            return Result::SUCCESS;
+        }
+
+        auto flowgraph = state.flowgraph.items.at(msg.flowgraph);
+        const auto oldId = msg.oldId;
+        const auto newId = msg.newId;
+        callbacks.enqueueCommandWithMail([flowgraph, oldId, newId]() -> Result {
+            return flowgraph->blockRename(oldId, newId);
+        }, false, MailRenameStackBlock{
+            .flowgraph = msg.flowgraph,
+            .oldId = oldId,
+            .newId = newId,
+        });
+        callbacks.enqueueMail(MailCloseModal{});
         return Result::SUCCESS;
     }
 
@@ -308,9 +364,12 @@ struct FlowgraphActions {
         auto flowgraph = state.flowgraph.items[msg.flowgraph];
         auto blockId = msg.blockId;
 
-        callbacks.enqueueCommand([flowgraph, blockId]() -> Result {
+        callbacks.enqueueCommandWithMail([flowgraph, blockId]() -> Result {
             return flowgraph->blockDestroy(blockId);
-        }, false);
+        }, false, MailRemoveStackBlock{
+            .flowgraph = msg.flowgraph,
+            .block = blockId,
+        });
 
         return Result::SUCCESS;
     }
@@ -350,16 +409,15 @@ struct FlowgraphActions {
         }
 
         auto flowgraph = state.flowgraph.items[msg.flowgraph];
-        const auto blocks = flowgraph->blockList();
-        if (!blocks.contains(msg.blockId)) {
+        Flowgraph::View::BlockData block;
+        if (flowgraph->view().block(msg.blockId, block) != Result::SUCCESS) {
             JST_ERROR("Failed to change block device because block was not found.");
             return Result::ERROR;
         }
 
-        const auto& block = blocks.at(msg.blockId);
-        if (block->device() == msg.device &&
-            block->runtime() == msg.runtime &&
-            block->provider() == msg.provider) {
+        if (block.device == msg.device &&
+            block.runtime == msg.runtime &&
+            block.provider == msg.provider) {
             return Result::SUCCESS;
         }
 
@@ -442,19 +500,17 @@ struct FlowgraphActions {
         }
 
         auto flowgraph = state.flowgraph.items[msg.flowgraph];
-        const auto blocks = flowgraph->blockList();
-        if (!blocks.contains(msg.blockId)) {
+        Flowgraph::View::BlockData block;
+        if (flowgraph->view().block(msg.blockId, block) != Result::SUCCESS) {
             JST_ERROR("Failed to copy block because block was not found.");
             return Result::ERROR;
         }
 
-        const auto& block = blocks.at(msg.blockId);
-
-        state.clipboard.moduleType = block->config().type();
-        state.clipboard.device = block->device();
-        state.clipboard.runtime = block->runtime();
-        state.clipboard.provider = block->provider();
-        flowgraph->blockConfig(msg.blockId, state.clipboard.config);
+        state.clipboard.moduleType = block.type;
+        state.clipboard.device = block.device;
+        state.clipboard.runtime = block.runtime;
+        state.clipboard.provider = block.provider;
+        state.clipboard.config = block.config;
         state.clipboard.hasData = true;
 
         callbacks.notify(Sakura::ToastType::Info, 3000, "Block copied to clipboard.");
@@ -474,19 +530,15 @@ struct FlowgraphActions {
         }
 
         auto flowgraph = state.flowgraph.items[msg.flowgraph];
-        const auto existingBlocks = flowgraph->blockList();
 
-        std::string baseName = state.clipboard.moduleType;
-        std::string blockName = baseName;
-        int suffix = 1;
-        while (existingBlocks.contains(blockName)) {
-            blockName = jst::fmt::format("{}_{}", baseName, suffix++);
-        }
+        const std::string blockName = Naming::UniqueName(state.clipboard.moduleType, [&](const std::string& candidate) {
+            return flowgraph->view().has(candidate);
+        });
 
         if (msg.gridPosition.has_value()) {
             const auto& pos = msg.gridPosition.value();
-            const NodeMeta nodeMeta = {pos.x, pos.y, 140.0f, 0.0f};
-            flowgraph->setMeta("node", nodeMeta, blockName);
+            const NodeMeta nodeMeta = {pos.x, pos.y, 0.0f, 0.0f};
+            flowgraph->metadata().set("node", nodeMeta, blockName);
         }
 
         auto config = state.clipboard.config;
@@ -516,13 +568,37 @@ struct FlowgraphActions {
             return Result::SUCCESS;
         }
 
-        state.flowgraph.items.at(msg.flowgraph)->setMeta("node", msg.meta, msg.block);
+        auto flowgraph = state.flowgraph.items.at(msg.flowgraph);
+        NodeMeta existing;
+        flowgraph->metadata().get("node", existing, msg.block);
+        NodeMeta merged = msg.meta;
+        if (msg.base.has_value()) {
+            for (const auto field : {&NodeMeta::x, &NodeMeta::y, &NodeMeta::width, &NodeMeta::height}) {
+                if (existing.*field != (*msg.base).*field) {
+                    merged.*field = existing.*field;
+                }
+            }
+        }
+        flowgraph->metadata().set("node", merged, msg.block);
         return Result::SUCCESS;
     }
 
-    Result handle(const MailSurfaceMouse& msg) {
+    Result handle(const MailSetConfigCollapsed& msg) {
+        if (!state.flowgraph.items.contains(msg.flowgraph)) {
+            return Result::SUCCESS;
+        }
+
+        auto flowgraph = state.flowgraph.items.at(msg.flowgraph);
+        ConfigMeta existing;
+        flowgraph->metadata().get("config", existing, msg.block);
+        existing.collapsed = msg.collapsed;
+        flowgraph->metadata().set("config", existing, msg.block);
+        return Result::SUCCESS;
+    }
+
+    Result handle(const MailSurfaceInput& msg) {
         if (msg.surface) {
-            msg.surface->pushMouseEvent(msg.event);
+            msg.surface->pushInputEvent(msg.event);
         }
 
         return Result::SUCCESS;
@@ -537,15 +613,14 @@ struct FlowgraphActions {
             state.flowgraph.items.contains(msg.flowgraph)) {
             SurfaceMeta surfaceMeta;
             auto flowgraph = state.flowgraph.items.at(msg.flowgraph);
-            flowgraph->getMeta(msg.metaKey, surfaceMeta, msg.block);
+            flowgraph->metadata().get(msg.metaKey, surfaceMeta, msg.block);
             if (msg.placement == SurfacePlacement::Attached) {
-                surfaceMeta.attachedWidth = msg.resize.logicalSize.x;
                 surfaceMeta.attachedHeight = msg.resize.logicalSize.y;
             } else {
                 surfaceMeta.detachedWidth = msg.resize.logicalSize.x;
                 surfaceMeta.detachedHeight = msg.resize.logicalSize.y;
             }
-            flowgraph->setMeta(msg.metaKey, surfaceMeta, msg.block);
+            flowgraph->metadata().set(msg.metaKey, surfaceMeta, msg.block);
         }
 
         SurfaceEvent event;
@@ -553,6 +628,9 @@ struct FlowgraphActions {
         event.size = msg.resize.framebufferSize;
         event.scale = msg.resize.scale;
         event.backgroundColor = {0.0f, 0.0f, 0.0f, 1.0f};
+        event.placement = (msg.placement == SurfacePlacement::Attached)
+                              ? SurfacePlacementType::Attached
+                              : SurfacePlacementType::Detached;
         msg.surface->pushSurfaceEvent(event);
 
         return Result::SUCCESS;

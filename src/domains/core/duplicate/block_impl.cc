@@ -6,7 +6,6 @@
 namespace Jetstream::Blocks {
 
 struct DuplicateImpl : public Block::Impl, public DynamicConfig<Blocks::Duplicate> {
-    Result validate() override;
     Result configure() override;
     Result define() override;
     Result create() override;
@@ -14,20 +13,6 @@ struct DuplicateImpl : public Block::Impl, public DynamicConfig<Blocks::Duplicat
  protected:
     std::shared_ptr<Modules::Duplicate> moduleConfig = std::make_shared<Modules::Duplicate>();
 };
-
-Result DuplicateImpl::validate() {
-    const auto& config = *candidate();
-
-    if (hostAccessible != config.hostAccessible) {
-        return Result::RECREATE;
-    }
-
-    if (outputDevice != config.outputDevice) {
-        return Result::RECREATE;
-    }
-
-    return Result::SUCCESS;
-}
 
 Result DuplicateImpl::configure() {
     moduleConfig->hostAccessible = hostAccessible;
@@ -37,19 +22,27 @@ Result DuplicateImpl::configure() {
 }
 
 Result DuplicateImpl::define() {
+    const auto& config = *candidate();
+
     JST_CHECK(defineInterfaceInput("buffer", "Input", "Signal to be duplicated."));
     JST_CHECK(defineInterfaceOutput("buffer", "Output", "Duplicated signal."));
 
     JST_CHECK(defineInterfaceConfig("outputDevice",
                                     "Output Device",
                                     "Selects the output device for the duplicated buffer.",
-                                    "dropdown:none(None),cpu(CPU),cuda(CUDA),metal(Metal),vulkan(Vulkan)"));
+                                    {{"type", "dropdown"}, {"options", Parser::Sequence{
+                                        Parser::Map{{"label", "None"}, {"value", "none"}},
+                                        Parser::Map{{"label", "CPU"}, {"value", "cpu"}},
+                                        Parser::Map{{"label", "CUDA"}, {"value", "cuda"}},
+                                        Parser::Map{{"label", "Metal"}, {"value", "metal"}},
+                                        Parser::Map{{"label", "Vulkan"}, {"value", "vulkan"}},
+                                    }}}));
 
-    if (StringToDevice(outputDevice) != DeviceType::CPU) {
+    if (StringToDevice(config.outputDevice) != DeviceType::CPU) {
         JST_CHECK(defineInterfaceConfig("hostAccessible",
                                         "Host Accessible",
                                         "When enabled, the output buffer can be accessed from the CPU.",
-                                        "bool"));
+                                        {{"type", "bool"}}));
     }
 
     return Result::SUCCESS;
@@ -64,6 +57,6 @@ Result DuplicateImpl::create() {
     return Result::SUCCESS;
 }
 
-JST_REGISTER_BLOCK(DuplicateImpl);
+JST_REGISTER_BLOCK(DuplicateImpl, {"duplicate"});
 
 }  // namespace Jetstream::Blocks

@@ -1,9 +1,14 @@
 #ifndef JETSTREAM_PLATFORM_HH
 #define JETSTREAM_PLATFORM_HH
 
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "jetstream/types.hh"
@@ -12,7 +17,122 @@
 
 namespace Jetstream::Platform {
 
-class FileLock {
+//
+// Paths
+//
+
+JETSTREAM_API std::filesystem::path PathFromUtf8(const std::string& path);
+JETSTREAM_API std::string PathToUtf8(const std::filesystem::path& path);
+
+JETSTREAM_API Result EnvironmentVariable(const std::string& name, std::string& value);
+JETSTREAM_API Result EnvironmentPath(const std::string& name, std::filesystem::path& path);
+JETSTREAM_API Result WriteEnvironmentVariable(const std::string& name, const std::optional<std::string>& value);
+
+JETSTREAM_API Result ConfigPath(std::string& path);
+JETSTREAM_API Result CachePath(std::string& path);
+
+//
+// Secrets
+//
+
+JETSTREAM_API bool SecretStoreAvailable();
+JETSTREAM_API Result ReadSecret(const std::string& service, const std::string& account, std::string& value);
+JETSTREAM_API Result WriteSecret(const std::string& service, const std::string& account, const std::string& value);
+JETSTREAM_API Result DeleteSecret(const std::string& service, const std::string& account);
+
+//
+// Storage
+//
+
+JETSTREAM_API Result InitializePersistentStorage();
+
+//
+// Terminal
+//
+
+JETSTREAM_API bool PrepareStandardOutputForAnsi();
+
+//
+// Interrupt
+//
+
+#if defined(JST_OS_LINUX) || defined(JST_OS_MAC) || defined(JST_OS_WINDOWS)
+JETSTREAM_API bool InstallInterruptHandler(void (*handler)() noexcept);
+JETSTREAM_API void UninstallInterruptHandler();
+JETSTREAM_API void WriteInterruptMessage(const char* message, std::size_t size) noexcept;
+[[noreturn]] JETSTREAM_API void ForceTerminate(I32 status) noexcept;
+#endif
+
+//
+// Socket
+//
+
+#if !defined(JST_OS_BROWSER)
+JETSTREAM_API bool ShutdownSocketRead(std::uintptr_t socket) noexcept;
+JETSTREAM_API void DisableSocketSigPipe(std::uintptr_t socket) noexcept;
+JETSTREAM_API void IgnoreBrokenPipe() noexcept;
+#endif
+
+//
+// Worker Thread
+//
+
+class JETSTREAM_API WorkerThread {
+ public:
+    WorkerThread();
+    ~WorkerThread();
+
+    WorkerThread(const WorkerThread&) = delete;
+    WorkerThread& operator=(const WorkerThread&) = delete;
+
+    void start(std::function<void()> fn);
+    void join();
+    bool joinable() const;
+
+ private:
+    struct Impl;
+    std::unique_ptr<Impl> impl;
+};
+
+//
+// Process
+//
+
+JETSTREAM_API Result RunProcess(const std::string& executable,
+                                const std::vector<std::string>& arguments,
+                                std::string& output,
+                                U64 timeoutMilliseconds = 0,
+                                bool combineOutput = false,
+                                std::function<void(std::string_view)> onOutput = {});
+
+//
+// Dynamic Library
+//
+
+enum class DynamicLibraryVisibility {
+    Local,
+    Global,
+};
+
+JETSTREAM_API void* OpenDynamicLibrary(const std::string& path,
+                                       DynamicLibraryVisibility visibility,
+                                       std::string& error);
+JETSTREAM_API void CloseDynamicLibrary(void* handle);
+JETSTREAM_API void* LoadDynamicLibrarySymbol(void* handle,
+                                             const char* symbol,
+                                             std::string& error);
+
+//
+// Files
+//
+
+JETSTREAM_API Result WriteFileAtomic(const std::string& path, std::string_view bytes, bool ownerOnly = false);
+
+//
+// File Lock
+//
+
+class JETSTREAM_API FileLock {
  public:
     FileLock();
     ~FileLock();
@@ -32,18 +152,27 @@ class FileLock {
     std::unique_ptr<Impl> impl;
 };
 
-Result OpenUrl(const std::string& url);
-Result ConfigPath(std::string& path);
-Result CachePath(std::string& path);
-Result PickFile(std::string& path,
-                const std::vector<std::string>& extensions = {},
-                std::function<void(std::string)> callback = nullptr);
-Result PickFolder(std::string& path,
-                  std::function<void(std::string)> callback = nullptr);
-Result SaveFile(std::string& path,
-                std::function<void(std::string)> callback = nullptr);
+//
+// URL
+//
 
-bool IsFilePending();
+JETSTREAM_API Result OpenUrl(const std::string& url);
+JETSTREAM_API Result OpenFolder(const std::string& path);
+
+//
+// Dialogs
+//
+
+JETSTREAM_API Result PickFile(std::string& path,
+                              const std::vector<std::string>& extensions = {},
+                              std::function<void(std::string)> callback = nullptr);
+JETSTREAM_API Result PickFolder(std::string& path,
+                                std::function<void(std::string)> callback = nullptr);
+JETSTREAM_API Result SaveFile(std::string& path,
+                              const std::vector<std::string>& extensions = {},
+                              std::function<void(std::string)> callback = nullptr);
+
+JETSTREAM_API bool IsFilePending();
 
 }  // namespace Jetstream::Platform
 

@@ -9,14 +9,15 @@
 // TODO: Remove testing namespace.
 namespace Jetstream {
 
-struct Token {
+struct JETSTREAM_API Token {
  public:
-    enum class Type { Number, Colon, Ellipsis };
+    enum class Type { Number, Colon, Ellipsis, ColonZeroEnd };
 
     Token();
     Token(U64 _a);
     Token(U64 _a, U64 _b);
     Token(U64 _a, U64 _b, U64 _c);
+    Token(U64 _a, U64 _b, U64 _c, bool _hasEnd);
     Token(I32 _a);
     Token(I32 _a, I32 _b);
     Token(I32 _a, I32 _b, I32 _c);
@@ -38,8 +39,9 @@ struct Token {
         return c;
     }
 
-    friend std::ostream& operator<<(std::ostream& os, const Token& token);
-    friend std::ostream& operator<<(std::ostream& os, const std::vector<Token>& tokens);
+    constexpr bool hasEnd() const {
+        return b != 0 || type == Type::ColonZeroEnd;
+    }
 
  private:
     U64 a = 0;
@@ -47,6 +49,9 @@ struct Token {
     U64 c = 1;
     Type type;
 };
+
+JETSTREAM_API std::ostream& operator<<(std::ostream& os, const Token& token);
+JETSTREAM_API std::ostream& operator<<(std::ostream& os, const std::vector<Token>& tokens);
 
 }  // namespace Jetstream
 

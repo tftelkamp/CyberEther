@@ -8,6 +8,7 @@ namespace Jetstream::Blocks {
 
 struct WebsocketImpl : public Block::Impl,
                        public DynamicConfig<Blocks::Websocket> {
+    Result validate() override;
     Result configure() override;
     Result define() override;
     Result create() override;
@@ -17,6 +18,20 @@ struct WebsocketImpl : public Block::Impl,
         std::make_shared<Modules::Websocket>();
     Modules::WebsocketImpl* moduleImpl = nullptr;
 };
+
+Result WebsocketImpl::validate() {
+    const auto& config = *candidate();
+
+    if (url != config.url ||
+        dataType != config.dataType ||
+        numberOfBatches != config.numberOfBatches ||
+        numberOfTimeSamples != config.numberOfTimeSamples ||
+        bufferMultiplier != config.bufferMultiplier) {
+        return Result::RECREATE;
+    }
+
+    return Result::SUCCESS;
+}
 
 Result WebsocketImpl::configure() {
     moduleConfig->url = url;
@@ -36,32 +51,36 @@ Result WebsocketImpl::define() {
     JST_CHECK(defineInterfaceConfig("url",
                                     "URL",
                                     "WebSocket server URL.",
-                                    "text"));
+                                    {{"type", "text"}}));
 
+    Parser::Sequence dataTypes;
+    for (const std::string type : {"CF32", "F32", "CI8", "I8", "CU8", "U8", "CI16", "I16", "CU16", "U16"}) {
+        dataTypes.emplace_back(Parser::Map{{"label", type}, {"value", type}});
+    }
     JST_CHECK(defineInterfaceConfig("dataType",
                                     "Data Type",
                                     "Sample format of incoming data.",
-                                    "dropdown:CF32(CF32),F32(F32),CI8(CI8),I8(I8),CU8(CU8),U8(U8),CI16(CI16),I16(I16),CU16(CU16),U16(U16)"));
+                                    {{"type", "dropdown"}, {"options", std::move(dataTypes)}}));
 
     JST_CHECK(defineInterfaceConfig("numberOfBatches",
                                     "Batches",
                                     "Number of batches in output buffer.",
-                                    "int:batches"));
+                                    {{"type", "uint"}, {"unit", "batches"}}));
 
     JST_CHECK(defineInterfaceConfig("numberOfTimeSamples",
                                     "Samples",
-                                    "Number of samples per batch.",
-                                    "int:samples"));
+                                    "Samples per batch and the FFT size downstream.",
+                                    {{"type", "uint"}, {"unit", "samples"}}));
 
     JST_CHECK(defineInterfaceConfig("bufferMultiplier",
                                     "Buffer Multiplier",
                                     "Internal buffer size multiplier.",
-                                    "int:x"));
+                                    {{"type", "uint"}, {"unit", "x"}}));
 
     JST_CHECK(defineInterfaceMetric("bufferHealth",
                                     "Buffer Health",
                                     "Current buffer occupancy level.",
-                                    "progressbar",
+                                    {{"type", "progressbar"}},
         [this]() -> std::any {
             if (!moduleImpl) {
                 return std::pair<std::string, F32>{"0.0%", 0.0f};
@@ -74,7 +93,7 @@ Result WebsocketImpl::define() {
     JST_CHECK(defineInterfaceMetric("throughput",
                                     "Throughput",
                                     "Current data throughput.",
-                                    "label",
+                                    {{"type", "label"}},
         [this]() -> std::any {
             if (!moduleImpl) {
                 return std::string("N/A");
@@ -95,6 +114,6 @@ Result WebsocketImpl::create() {
     return Result::SUCCESS;
 }
 
-JST_REGISTER_BLOCK(WebsocketImpl);
+JST_REGISTER_BLOCK(WebsocketImpl, {"websocket"});
 
 }  // namespace Jetstream::Blocks

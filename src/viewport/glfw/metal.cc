@@ -1,5 +1,3 @@
-#include <csignal>
-
 #include "jetstream/viewport/platforms/glfw/metal.hh"
 
 #define GLFW_INCLUDE_NONE
@@ -9,13 +7,15 @@
 
 #include "tools/imgui_impl_glfw.h"
 
+#include <string>
+#include <utility>
+#include <vector>
+
 namespace Jetstream::Viewport {
 
 static void PrintGLFWError(int, const char* description) {
     JST_FATAL("[METAL] GLFW error: {}", description);
 }
-
-static bool keepRunningFlag;
 
 using Implementation = GLFW<DeviceType::Metal>;
 
@@ -28,17 +28,6 @@ Implementation::~GLFW() {
 }
 
 Result Implementation::create() {
-    // Register signal handler.
-
-    keepRunningFlag = true;
-    std::signal(SIGINT, [](int){
-        if (!keepRunningFlag) {
-            JST_DEBUG("[METAL] Exiting via SIGINT...");
-            std::exit(0);
-        }
-        keepRunningFlag = false;
-    });
-
     // Initialize and configure GLFW.
 
     if (!glfwInit()) {
@@ -60,6 +49,22 @@ Result Implementation::create() {
         JST_ERROR("[METAL] Failed to create window with GLFW.");
         return Result::ERROR;
     }
+
+    glfwSetWindowUserPointer(window, this);
+    glfwSetDropCallback(window, [](GLFWwindow* handle, int count, const char** paths) {
+        auto* viewport = static_cast<Implementation*>(glfwGetWindowUserPointer(handle));
+        if (!viewport || count <= 0 || !paths) {
+            return;
+        }
+        std::vector<std::string> files;
+        files.reserve(static_cast<U64>(count));
+        for (int i = 0; i < count; ++i) {
+            if (paths[i]) {
+                files.emplace_back(paths[i]);
+            }
+        }
+        (void)viewport->addFileDropEvent(std::move(files));
+    });
 
     auto* device = Backend::State<DeviceType::Metal>()->getDevice();
 
@@ -132,7 +137,7 @@ Result Implementation::pollEvents() {
 }
 
 bool Implementation::keepRunning() {
-    return !glfwWindowShouldClose(window) && keepRunningFlag;
+    return !glfwWindowShouldClose(window);
 }
 
 }  // namespace Jetstream::Viewport

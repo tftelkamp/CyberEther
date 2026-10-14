@@ -3,7 +3,7 @@
 
 #include "../components/modal_header.hh"
 
-#include "jetstream/render/sakura/sakura.hh"
+#include "jetstream/render/sakura/base.hh"
 #include "jetstream/render/tools/imgui_icons_ext.hh"
 
 #include <functional>
@@ -12,7 +12,7 @@
 
 namespace Jetstream {
 
-struct PluginView : public Sakura::Component {
+struct PluginView {
     struct Config {
         std::function<void(const std::string&, std::function<void(std::string)>)> onBrowse;
         std::function<void(const std::string&)> onRegister;
@@ -31,7 +31,7 @@ struct PluginView : public Sakura::Component {
         pathField.update({
             .id = "RegistryPluginPathField",
             .label = "Plugin Path",
-            .description = "Path to a .so, .dylib, or .dll file that registers additional blocks.",
+            .description = "Path to a .cep plugin bundle that registers additional blocks.",
         });
 
         pathInput.update({

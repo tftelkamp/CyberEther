@@ -1,18 +1,22 @@
 #ifndef JETSTREAM_RENDER_BASE_TEXTURE_HH
 #define JETSTREAM_RENDER_BASE_TEXTURE_HH
 
+#include <atomic>
 #include <memory>
+#include <mutex>
+#include <vector>
 
 #include "jetstream/types.hh"
 #include "jetstream/logger.hh"
 #include "jetstream/render/base/buffer.hh"
 #include "jetstream/render/types.hh"
 #include "jetstream/render/base/implementations.hh"
+#include "jetstream/render/base/transfer.hh"
 #include "jetstream/render/base/window_attachment.hh"
 
 namespace Jetstream::Render {
 
-class Texture : public WindowAttachment {
+class JETSTREAM_API Texture : public WindowAttachment {
  public:
     enum class PixelFormat : U64 {
         RGBA,
@@ -39,7 +43,7 @@ class Texture : public WindowAttachment {
         bool multisampled = false;
     };
 
-    explicit Texture(const Config& config) : config(config) {}
+    explicit Texture(const Config& config);
     virtual ~Texture() = default;
 
     Type type() const override {
@@ -57,11 +61,19 @@ class Texture : public WindowAttachment {
     constexpr const Extent2D<U64>& size() const {
         return config.size;
     }
-    virtual bool size(const Extent2D<U64>& size) = 0;
+    bool size(const Extent2D<U64>& size);
 
     virtual uint64_t raw() const = 0;
-    virtual Result fill() = 0;
-    virtual Result fillRow(const U64& y, const U64& height) = 0;
+    Result fill();
+    Result fillRow(const U64& y, const U64& height);
+
+    void presentationHint(U64 frame, bool visible) const {
+        presentationVisible = (presentationFrame == frame && presentationVisible) || visible;
+        presentationFrame = frame;
+    }
+    bool visibleForPresentation(U64 frame) const {
+        return presentationFrame != frame || presentationVisible;
+    }
 
     template<DeviceType D>
     static std::shared_ptr<Texture> Factory(const Config& config) {
@@ -69,7 +81,26 @@ class Texture : public WindowAttachment {
     }
 
  protected:
+    Result validateFillRow(const U64& y, const U64& height) const;
+    virtual Result underlyingDump(uint8_t* output) const;
+
     Config config;
+
+    U64 pixelByteSize() const;
+ private:
+    Result dump(std::vector<U8>& output) const;
+    Result fillRowLocked(const U64& y, const U64& height);
+    void restorePendingUploads(std::vector<Transfer::PendingUpload> uploads);
+
+    std::mutex uploadMutex;
+    Transfer::PendingUploadQueue pendingUploads;
+    std::atomic<U64> uploadGeneration = 0;
+    mutable U64 presentationFrame = ~U64{0};
+    mutable bool presentationVisible = true;
+
+    friend class Transfer;
+    friend class Transfer::Batch;
+    friend class Window;
 };
 
 }  // namespace Jetstream::Render

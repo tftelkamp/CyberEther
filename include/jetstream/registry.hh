@@ -9,17 +9,27 @@
 
 #include "jetstream/provider.hh"
 #include "jetstream/runtime.hh"
+#include "jetstream/parser.hh"
 #include "jetstream/module.hh"
 #include "jetstream/block.hh"
+#include "jetstream/flowgraph.hh"
 #include "jetstream/benchmark.hh"
 
 namespace Jetstream {
 
 class JETSTREAM_API Registry {
  public:
-    using ModuleFactory = std::function<std::shared_ptr<Module>()>;
+    using ModuleFactory = std::function<std::shared_ptr<Module>(const std::shared_ptr<Flowgraph::Environment>&,
+                                                                const std::shared_ptr<Flowgraph::View>&)>;
     using BlockFactory = std::function<std::shared_ptr<Block>()>;
     using BenchmarkFactory = std::function<std::vector<Benchmark::Case>()>;
+
+    struct BlockModuleRequirement {
+        std::string type;
+        bool conditional = false;
+
+        bool operator==(const BlockModuleRequirement&) const = default;
+    };
 
     struct ModuleRegistration {
         std::string type;
@@ -35,15 +45,24 @@ class JETSTREAM_API Registry {
         std::string title;
         std::string summary;
         std::string description;
+        std::vector<BlockModuleRequirement> moduleRequirements;
         BlockFactory factory;
+    };
+
+    struct BlockTarget {
+        DeviceType device;
+        RuntimeType runtime;
+        ProviderType provider;
     };
 
     struct FlowgraphRegistration {
         std::string key;
         std::string title;
-        std::string summary;
-        std::string description;
+        std::string summary = "No summary.";
+        std::string description = "No description.";
         std::string content;
+
+        JST_SERDES(title, summary, description);
     };
 
     struct BenchmarkRegistration {
@@ -66,7 +85,8 @@ class JETSTREAM_API Registry {
                                 const std::string& title,
                                 const std::string& summary,
                                 const std::string& description,
-                                BlockFactory factory);
+                                BlockFactory factory,
+                                const std::vector<BlockModuleRequirement>& moduleRequirements = {});
     static Result RegisterFlowgraph(const std::string& key,
                                     const FlowgraphRegistration& metadata);
     static Result RegisterBenchmark(const std::string& moduleType,
@@ -89,6 +109,8 @@ class JETSTREAM_API Registry {
                              const ProviderType& provider = "");
     static std::vector<BlockRegistration>
         ListAvailableBlocks(const std::string& type = "");
+    static std::vector<BlockTarget>
+        ListAvailableBlockTargets(const std::string& type);
     static std::vector<FlowgraphRegistration>
         ListAvailableFlowgraphs(const std::string& key = "");
     static std::vector<BenchmarkRegistration>
@@ -98,7 +120,9 @@ class JETSTREAM_API Registry {
                                const DeviceType& device,
                                const RuntimeType& runtime,
                                const ProviderType& provider,
-                               std::shared_ptr<Module>& module);
+                               std::shared_ptr<Module>& module,
+                               const std::shared_ptr<Flowgraph::Environment>& environment = nullptr,
+                               const std::shared_ptr<Flowgraph::View>& view = nullptr);
     static Result BuildBlock(const std::string& type, std::shared_ptr<Block>& block);
 
  private:
@@ -124,11 +148,15 @@ class JETSTREAM_API Registry {
                 device, \
                 runtime, \
                 provider, \
-                [device, runtime, provider]() { \
+                [device, runtime, provider](const std::shared_ptr<::Jetstream::Flowgraph::Environment>& environment, \
+                                            const std::shared_ptr<::Jetstream::Flowgraph::View>& view) { \
                     const auto impl = std::make_shared<impl_type>(); \
                     const auto runtimeContext = std::static_pointer_cast<::Jetstream::Runtime::Context>(impl); \
                     const auto schedulerContext = std::static_pointer_cast<::Jetstream::Scheduler::Context>(impl); \
-                    const auto context = std::make_shared<::Jetstream::Module::Context>(runtimeContext, schedulerContext); \
+                    const auto context = std::make_shared<::Jetstream::Module::Context>(runtimeContext, \
+                                                                                        schedulerContext, \
+                                                                                        environment, \
+                                                                                        view); \
                     const auto stagedConfig = std::static_pointer_cast<::Jetstream::Module::Config>(impl); \
                     const auto candidateConfig = std::static_pointer_cast<::Jetstream::Module::Config>(impl->candidate()); \
                     return std::make_shared<::Jetstream::Module>(device, \
@@ -146,11 +174,16 @@ class JETSTREAM_API Registry {
 #define JST_REGISTER_MODULE(impl_type, device_val, runtime_val, provider_val) \
     JST_DETAIL_REGISTER_MODULE(impl_type, device_val, runtime_val, provider_val, __COUNTER__)
 
-#define JST_DETAIL_REGISTER_BLOCK(impl_type, id) \
+#define JST_DETAIL_REGISTER_BLOCK(impl_type, default_to_type, id, ...) \
     namespace { \
     [[maybe_unused]] const ::Jetstream::Result JST_DETAIL_CONCAT(__jst_register_block_, id) = \
         ::Jetstream::Registry::QueueStaticRegistration([]() { \
             const auto block = std::make_shared<impl_type>(); \
+            auto moduleRequirements = \
+                std::vector<::Jetstream::Registry::BlockModuleRequirement>{__VA_ARGS__}; \
+            if (default_to_type && moduleRequirements.empty()) { \
+                moduleRequirements.push_back({block->type()}); \
+            } \
             return ::Jetstream::Registry::RegisterBlock( \
                 block->type(), \
                 block->domain(), \
@@ -162,32 +195,44 @@ class JETSTREAM_API Registry {
                     const auto stagedConfig = std::static_pointer_cast<::Jetstream::Block::Config>(impl); \
                     const auto candidateConfig = std::static_pointer_cast<::Jetstream::Block::Config>(impl->candidate()); \
                     return std::make_shared<::Jetstream::Block>(impl, stagedConfig, candidateConfig); \
-                } \
+                }, \
+                moduleRequirements \
             ); \
         }); \
     }
 
-#define JST_REGISTER_BLOCK(impl_type) \
-    JST_DETAIL_REGISTER_BLOCK(impl_type, __COUNTER__)
+#define JST_REGISTER_BLOCK(impl_type, ...) \
+    JST_DETAIL_REGISTER_BLOCK(impl_type, true, __COUNTER__, __VA_ARGS__)
 
-#define JST_DETAIL_REGISTER_EXAMPLE(key_val, title_val, summary_val, description_val, content_val, id) \
+#define JST_REGISTER_BLOCK_NO_MODULES(impl_type) \
+    JST_DETAIL_REGISTER_BLOCK(impl_type, false, __COUNTER__)
+
+#define JST_DETAIL_REGISTER_EXAMPLE(key_val, content_val, id) \
     namespace { \
     [[maybe_unused]] const ::Jetstream::Result JST_DETAIL_CONCAT(__jst_register_example_, id) = \
         ::Jetstream::Registry::QueueStaticRegistration([]() { \
-            const std::string key = key_val; \
-            const std::string title = title_val; \
-            const std::string summary = summary_val; \
-            const std::string description = description_val; \
-            const std::string content = content_val; \
-            return ::Jetstream::Registry::RegisterFlowgraph( \
-                key, \
-                {key, title, summary, description, content} \
-            ); \
+            ::Jetstream::Registry::FlowgraphRegistration record; \
+            record.key = key_val; \
+            record.title = record.key; \
+            record.content = content_val; \
+            ::Jetstream::Parser::Map data; \
+            auto result = ::Jetstream::Parser::YamlDecode(record.content, data); \
+            if (result != ::Jetstream::Result::SUCCESS) { \
+                return result; \
+            } \
+            result = record.deserialize(data); \
+            if (result != ::Jetstream::Result::SUCCESS) { \
+                return result; \
+            } \
+            if (record.title.empty()) { \
+                record.title = record.key; \
+            } \
+            return ::Jetstream::Registry::RegisterFlowgraph(record.key, record); \
         }); \
     }
 
-#define JST_REGISTER_EXAMPLE(key_val, title_val, summary_val, description_val, content_val) \
-    JST_DETAIL_REGISTER_EXAMPLE(key_val, title_val, summary_val, description_val, content_val, __COUNTER__)
+#define JST_REGISTER_EXAMPLE(key_val, content_val) \
+    JST_DETAIL_REGISTER_EXAMPLE(key_val, content_val, __COUNTER__)
 
 #define JST_DETAIL_REGISTER_BENCHMARKS(module_type_val, id) \
     static std::vector<::Jetstream::Benchmark::Case> \

@@ -1,9 +1,8 @@
 #include "jetstream/render/devices/metal/window.hh"
 #include "jetstream/render/devices/metal/surface.hh"
-#include "jetstream/render/devices/metal/buffer.hh"
-#include "jetstream/render/devices/metal/texture.hh"
 
 #include "tools/imgui_impl_metal.h"
+#include "jetstream/render/tools/imgui_blend_ext.h"
 
 namespace Jetstream::Render {
 
@@ -45,6 +44,7 @@ Result Implementation::underlyingCreate() {
 
     statsData.droppedFrames = 0;
     statsData.recreatedFrames = 0;
+    currentFrame = 0;
 
     return Result::SUCCESS;
 }
@@ -52,14 +52,35 @@ Result Implementation::underlyingCreate() {
 Result Implementation::underlyingDestroy() {
     JST_DEBUG("[METAL] Destroying window.");
 
-    JST_CHECK(destroyImgui());
+    Result result = underlyingSynchronize();
+    underlyingCancel();
 
-    renderPassDescriptor->release();
-    commandQueue->release();
+    if (imguiCreated) {
+        const Result imguiResult = destroyImgui();
+        if ((result == Result::SUCCESS || result == Result::RELOAD) &&
+            imguiResult != Result::SUCCESS && imguiResult != Result::RELOAD) {
+            result = imguiResult;
+        }
+    }
 
-    outerPool->release();
+    transferEncoder.destroy();
 
-    return Result::SUCCESS;
+    if (renderPassDescriptor) {
+        renderPassDescriptor->release();
+        renderPassDescriptor = nullptr;
+    }
+    if (commandQueue) {
+        commandQueue->release();
+        commandQueue = nullptr;
+    }
+
+    if (outerPool) {
+        outerPool->release();
+        outerPool = nullptr;
+    }
+    dev = nullptr;
+
+    return result;
 }
 
 Result Implementation::createImgui() {
@@ -72,16 +93,36 @@ Result Implementation::createImgui() {
     style = &ImGui::GetStyle();
     io->IniFilename = nullptr;
 
-#ifndef JST_OS_IOS
-    io->ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-#endif
     io->ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
-    JST_CHECK(viewport->createImgui());
+    Result viewportResult;
+    try {
+        viewportResult = viewport->createImgui();
+    } catch (...) {
+        ImGui::DestroyContext();
+        io = nullptr;
+        style = nullptr;
+        throw;
+    }
+    if (viewportResult != Result::SUCCESS && viewportResult != Result::RELOAD) {
+        ImGui::DestroyContext();
+        io = nullptr;
+        style = nullptr;
+        return viewportResult;
+    }
 
-    this->updateScalingFactor(*viewport);
-
-    ImGui_ImplMetal_Init(dev);
+    try {
+        this->updateScalingFactor(*viewport);
+        ImGui_ImplMetal_Init(dev);
+        ImGui::RegisterPremultipliedAlphaCallback(ImGui_ImplMetal_PremultipliedAlphaCallback);
+    } catch (...) {
+        viewport->destroyImgui();
+        ImGui::DestroyContext();
+        io = nullptr;
+        style = nullptr;
+        throw;
+    }
+    imguiCreated = true;
 
     return Result::SUCCESS;
 }
@@ -89,11 +130,15 @@ Result Implementation::createImgui() {
 Result Implementation::destroyImgui() {
     JST_DEBUG("[METAL] Destroying ImGui.");
 
+    ImGui::UnregisterPremultipliedAlphaCallback(ImGui_ImplMetal_PremultipliedAlphaCallback);
     ImGui_ImplMetal_Shutdown();
-    JST_CHECK(viewport->destroyImgui());
+    const Result result = viewport->destroyImgui();
     ImGui::DestroyContext();
+    io = nullptr;
+    style = nullptr;
+    imguiCreated = false;
 
-    return Result::SUCCESS;
+    return result;
 }
 
 Result Implementation::beginImgui() {
@@ -107,9 +152,11 @@ Result Implementation::beginImgui() {
 }
 
 Result Implementation::endImgui() {
+    const auto& background = frameClearColor();
+    renderPassDescriptor->colorAttachments()->object(0)->setClearColor(
+        MTL::ClearColor(background.r, background.g, background.b, background.a));
     auto renderCmdEncoder = commandBuffer->renderCommandEncoder(renderPassDescriptor);
 
-    ImGui::Render();
     ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(),
         commandBuffer, renderCmdEncoder);
 
@@ -119,12 +166,20 @@ Result Implementation::endImgui() {
 }
 
 Result Implementation::underlyingBegin() {
+    if (inFlightCommandBuffers[currentFrame]) {
+        inFlightCommandBuffers[currentFrame]->waitUntilCompleted();
+        inFlightCommandBuffers[currentFrame]->release();
+        inFlightCommandBuffers[currentFrame] = nullptr;
+    }
+
     innerPool = NS::AutoreleasePool::alloc()->init();
 
     drawable = static_cast<CA::MetalDrawable*>(viewport->nextDrawable());
 
     if (!drawable) {
         statsData.droppedFrames += 1;
+        innerPool->release();
+        innerPool = nullptr;
         return Result::SKIP;
     }
 
@@ -135,29 +190,103 @@ Result Implementation::underlyingBegin() {
     colorAttachDescriptor->setClearColor(MTL::ClearColor(0, 0, 0, 1.0));
 
     commandBuffer = commandQueue->commandBuffer();
-
-    for (auto &surface : surfaces) {
-        JST_CHECK(surface->draw(commandBuffer));
+    if (!commandBuffer) {
+        innerPool->release();
+        innerPool = nullptr;
+        return Result::ERROR;
     }
 
-    JST_CHECK(beginImgui());
+    for (auto& surface : surfaces) {
+        const Result prepareResult = surface->prepare();
+        if (prepareResult != Result::SUCCESS && prepareResult != Result::RELOAD) {
+            innerPool->release();
+            innerPool = nullptr;
+            commandBuffer = nullptr;
+            return prepareResult;
+        }
+    }
+
+    const Result result = beginImgui();
+    if (result != Result::SUCCESS && result != Result::RELOAD) {
+        innerPool->release();
+        innerPool = nullptr;
+        commandBuffer = nullptr;
+        return result;
+    }
 
     return Result::SUCCESS;
 }
 
 Result Implementation::underlyingEnd() {
-    JST_CHECK(endImgui());
+    Transfer::Batch transfers;
+
+    const auto abortFrame = [&](const Result& result) {
+        const Result recovery = underlyingCancel();
+        return recovery == Result::SUCCESS ? result : recovery;
+    };
+
+    Result result = collectTransfers(transfers);
+    if (result != Result::SUCCESS && result != Result::RELOAD) {
+        return abortFrame(result);
+    }
+    if (!transfers.empty()) {
+        result = transferEncoder.encode(transfers, commandBuffer, currentFrame);
+        if (result != Result::SUCCESS && result != Result::RELOAD) {
+            return abortFrame(result);
+        }
+    }
+
+    prepareImgui();
+    for (auto& surface : surfaces) {
+        const auto& framebuffer = *surface->getConfig().framebuffer;
+        result = surface->draw(commandBuffer, textureVisibleForPresentation(framebuffer));
+        if (result != Result::SUCCESS && result != Result::RELOAD) {
+            return abortFrame(result);
+        }
+    }
+
+    result = endImgui();
+    if (result != Result::SUCCESS && result != Result::RELOAD) {
+        return abortFrame(result);
+    }
 
     commandBuffer->presentDrawable(drawable);
+    commandBuffer->retain();
     commandBuffer->commit();
-    commandBuffer->waitUntilCompleted();
+    inFlightCommandBuffers[currentFrame] = commandBuffer;
+    for (auto& surface : surfaces) {
+        surface->commitDraw();
+    }
+    transfers.commit();
+
+    currentFrame = (currentFrame + 1) % FramesInFlight;
 
     innerPool->release();
+    innerPool = nullptr;
+    commandBuffer = nullptr;
 
     return Result::SUCCESS;
 }
 
+Result Implementation::underlyingCancel() {
+    commandBuffer = nullptr;
+    drawable = nullptr;
+    if (innerPool) {
+        innerPool->release();
+        innerPool = nullptr;
+    }
+    return Result::SUCCESS;
+}
+
 Result Implementation::underlyingSynchronize() {
+    for (auto*& inFlight : inFlightCommandBuffers) {
+        if (inFlight) {
+            inFlight->waitUntilCompleted();
+            inFlight->release();
+            inFlight = nullptr;
+        }
+    }
+
     return Result::SUCCESS;
 }
 

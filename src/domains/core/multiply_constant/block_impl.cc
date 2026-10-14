@@ -28,7 +28,7 @@ Result MultiplyConstantImpl::define() {
     JST_CHECK(defineInterfaceConfig("constant",
                                     "Constant",
                                     "Scalar value to multiply each element by.",
-                                    "float::3"));
+                                    {{"type", "float"}, {"precision", 3}}));
 
     return Result::SUCCESS;
 }
@@ -42,6 +42,6 @@ Result MultiplyConstantImpl::create() {
     return Result::SUCCESS;
 }
 
-JST_REGISTER_BLOCK(MultiplyConstantImpl);
+JST_REGISTER_BLOCK(MultiplyConstantImpl, {"multiply_constant"});
 
 }  // namespace Jetstream::Blocks

@@ -1,6 +1,7 @@
 #ifndef JETSTREAM_COMPOSITOR_IMPL_DEFAULT_META_HH
 #define JETSTREAM_COMPOSITOR_IMPL_DEFAULT_META_HH
 
+#include "jetstream/block.hh"
 #include "jetstream/parser.hh"
 
 #include <optional>
@@ -18,14 +19,38 @@ struct NodeMeta {
     JST_SERDES(x, y, width, height);
 };
 
+struct ConfigMeta {
+    bool collapsed = false;
+    bool detached = false;
+    std::string windowId;
+
+    JST_SERDES(collapsed, detached, windowId);
+};
+
+constexpr F32 DefaultNodeWidth(Block::NodeSize size) {
+    switch (size) {
+        case Block::NodeSize::XS:
+            return 120.0f;
+        case Block::NodeSize::M:
+            return 220.0f;
+        case Block::NodeSize::L:
+            return 320.0f;
+        case Block::NodeSize::XL:
+            return 460.0f;
+        default:
+            return 140.0f;
+    }
+}
+
 struct SurfaceMeta {
-    U64 attachedWidth = 256;
     U64 attachedHeight = 256;
     U64 detachedWidth = 512;
     U64 detachedHeight = 512;
     bool detached = false;
+    bool configCollapsed = true;
+    std::string windowId;
 
-    JST_SERDES(attachedWidth, attachedHeight, detachedWidth, detachedHeight, detached);
+    JST_SERDES(attachedHeight, detachedWidth, detachedHeight, detached, configCollapsed, windowId);
 };
 
 struct StackDockFlowgraphMeta {
@@ -42,14 +67,22 @@ struct StackDockSurfaceMeta {
     JST_SERDES(block, surface, order);
 };
 
+struct StackDockConfigMeta {
+    std::string block;
+    U64 order = 0;
+
+    JST_SERDES(block, order);
+};
+
 struct StackDockLayoutMeta {
     std::optional<std::string> direction;
     std::optional<F32> ratio;
     std::optional<std::vector<StackDockFlowgraphMeta>> flowgraphs;
     std::optional<std::vector<StackDockSurfaceMeta>> surfaces;
+    std::optional<std::vector<StackDockConfigMeta>> configs;
     std::optional<std::vector<StackDockLayoutMeta>> children;
 
-    JST_SERDES(direction, ratio, flowgraphs, surfaces, children);
+    JST_SERDES(direction, ratio, flowgraphs, surfaces, configs, children);
 };
 
 struct StackMeta {

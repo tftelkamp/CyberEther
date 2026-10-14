@@ -3,19 +3,28 @@
 
 #include <algorithm>
 #include <any>
+#include <array>
+#include <cmath>
+#include <limits>
+#include <exception>
 #include <functional>
+#include <initializer_list>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
+#include "jetstream/config.hh"
 #include "jetstream/types.hh"
 #include "jetstream/macros.hh"
 #include "jetstream/logger.hh"
 #include "jetstream/memory/tensor.hh"
 #include "jetstream/parser_detail.hh"
 #include "jetstream/parser_map.hh"
+#include "jetstream/runtime.hh"
+#include "jetstream/scheduler.hh"
 
 namespace Jetstream {
 
@@ -24,9 +33,36 @@ class JETSTREAM_API Parser {
     typedef ParserMap Map;
     typedef std::vector<std::any> Sequence;
 
+    static Sequence MakeSequence(std::initializer_list<std::any> values);
+    static bool Equal(const std::any& lhs, const std::any& rhs);
+
     template<typename T>
-    static Result StringToTyped(const std::string& encoded, T& variable);
+    static T Get(const Map& map, const std::string& key, T fallback = {}) {
+        if (map.contains(key)) {
+            T value{};
+            if (Deserialize(map, key, value) == Result::SUCCESS) {
+                return value;
+            }
+        }
+        return fallback;
+    }
+
+    template<typename T>
+    static Result StringToTyped(const std::string& encoded, T& variable) {
+        try {
+            return StringToTypedValue(encoded, variable);
+        } catch (const std::exception& e) {
+            try {
+                JST_ERROR("[PARSER] Failed to convert value '{}': {}", encoded, e.what());
+            } catch (...) {
+            }
+            return Result::ERROR;
+        } catch (...) {
+            return Result::ERROR;
+        }
+    }
     static Result TypedToString(const std::any& variable, std::string& encoded);
+    static bool TryTypedToString(const std::any& variable, std::string& encoded);
 
     template<typename T>
     static Result Serialize(Map& map, const std::string& name, const T& variable) {
@@ -54,22 +90,42 @@ class JETSTREAM_API Parser {
 
     template<typename T>
     static Result Deserialize(const Map& map, const std::string& name, T& variable) {
-        if (map.contains(name) == 0) {
-            if constexpr (detail::Optional<std::remove_cvref_t<T>>) {
-                variable.reset();
+        try {
+            if (map.contains(name) == 0) {
+                if constexpr (detail::Optional<std::remove_cvref_t<T>>) {
+                    variable.reset();
+                }
+
+                JST_TRACE("[PARSER] Variable name '{}' not found inside map.", name);
+                return Result::SUCCESS;
             }
 
-            JST_TRACE("[PARSER] Variable name '{}' not found inside map.", name);
-            return Result::SUCCESS;
-        }
+            const auto& encoded = map.at(name);
+            if (!encoded.has_value()) {
+                JST_ERROR("[PARSER] Variable '{}' not initialized.", name);
+                return Result::ERROR;
+            }
 
-        const auto& encoded = map.at(name);
-        if (!encoded.has_value()) {
-            JST_ERROR("[PARSER] Variable '{}' not initialized.", name);
+            return Decode(encoded, name, variable);
+        } catch (const Result& status) {
+            try {
+                JST_ERROR("[PARSER] Failed to deserialize variable '{}': {}.", name, status);
+            } catch (...) {
+            }
+            return Result::ERROR;
+        } catch (const std::exception& e) {
+            try {
+                JST_ERROR("[PARSER] Failed to deserialize variable '{}': {}.", name, e.what());
+            } catch (...) {
+            }
+            return Result::ERROR;
+        } catch (...) {
+            try {
+                JST_ERROR("[PARSER] Unknown exception while deserializing variable '{}'.", name);
+            } catch (...) {
+            }
             return Result::ERROR;
         }
-
-        return Decode(encoded, name, variable);
     }
 
     template<typename T>
@@ -115,6 +171,10 @@ class JETSTREAM_API Parser {
                 return 0;
             }
 
+            if (variable.type() == typeid(std::nullptr_t)) {
+                return Hash(nullptr);
+            }
+
             if (variable.type() == typeid(Map)) {
                 return Hash(std::any_cast<const Map&>(variable));
             }
@@ -129,12 +189,38 @@ class JETSTREAM_API Parser {
                 return 0;
             }
 
-            return std::hash<std::string>{}(encoded);
+            static const std::array encodedTypes = {
+                &typeid(std::string), &typeid(I8), &typeid(I16), &typeid(I32),
+                &typeid(U8), &typeid(U16), &typeid(U32), &typeid(I64), &typeid(U64),
+                &typeid(F32), &typeid(F64), &typeid(CF32), &typeid(CF64), &typeid(bool),
+                &typeid(DeviceType), &typeid(RuntimeType), &typeid(SchedulerType),
+                &typeid(std::vector<U64>), &typeid(std::vector<F32>),
+                &typeid(std::vector<CF32>), &typeid(std::vector<CF64>),
+                &typeid(std::vector<F64>), &typeid(Range<F32>),
+                &typeid(Extent2D<U64>), &typeid(Extent2D<F32>),
+            };
+            const auto type = std::find_if(encodedTypes.begin(), encodedTypes.end(), [&](const auto* candidate) {
+                return *candidate == variable.type();
+            });
+            if (type == encodedTypes.end()) {
+                JST_ERROR("[PARSER] Missing type discriminator for 'std::any' hash.");
+                return 0;
+            }
+
+            std::size_t seed = std::hash<std::string>{}(encoded);
+            const auto discriminator = static_cast<std::size_t>(type - encodedTypes.begin()) + 1;
+            seed ^= discriminator + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+            return seed;
         } else if constexpr (detail::Vector<ValueType>) {
             std::size_t seed = variable.size();
             for (const auto& entry : variable) {
                 seed ^= Hash(entry) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
             }
+
+            return seed;
+        } else if constexpr (std::is_same_v<ValueType, CF32> || std::is_same_v<ValueType, CF64>) {
+            std::size_t seed = Hash(variable.real());
+            seed ^= Hash(variable.imag()) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
 
             return seed;
         } else if constexpr (detail::HasStdHash<ValueType>) {
@@ -150,6 +236,33 @@ class JETSTREAM_API Parser {
     static std::vector<std::string> SplitString(const std::string& str, const std::string& delimiter);
 
  private:
+    static Result StringToTypedValue(const std::string& encoded, Tensor& variable);
+    static Result StringToTypedValue(const std::string& encoded, std::string& variable);
+    static Result StringToTypedValue(const std::string& encoded, I8& variable);
+    static Result StringToTypedValue(const std::string& encoded, I16& variable);
+    static Result StringToTypedValue(const std::string& encoded, I32& variable);
+    static Result StringToTypedValue(const std::string& encoded, I64& variable);
+    static Result StringToTypedValue(const std::string& encoded, U8& variable);
+    static Result StringToTypedValue(const std::string& encoded, U16& variable);
+    static Result StringToTypedValue(const std::string& encoded, U32& variable);
+    static Result StringToTypedValue(const std::string& encoded, U64& variable);
+    static Result StringToTypedValue(const std::string& encoded, F32& variable);
+    static Result StringToTypedValue(const std::string& encoded, F64& variable);
+    static Result StringToTypedValue(const std::string& encoded, CF32& variable);
+    static Result StringToTypedValue(const std::string& encoded, CF64& variable);
+    static Result StringToTypedValue(const std::string& encoded, bool& variable);
+    static Result StringToTypedValue(const std::string& encoded, DeviceType& variable);
+    static Result StringToTypedValue(const std::string& encoded, RuntimeType& variable);
+    static Result StringToTypedValue(const std::string& encoded, SchedulerType& variable);
+    static Result StringToTypedValue(const std::string& encoded, std::vector<U64>& variable);
+    static Result StringToTypedValue(const std::string& encoded, std::vector<F64>& variable);
+    static Result StringToTypedValue(const std::string& encoded, std::vector<F32>& variable);
+    static Result StringToTypedValue(const std::string& encoded, std::vector<CF32>& variable);
+    static Result StringToTypedValue(const std::string& encoded, std::vector<CF64>& variable);
+    static Result StringToTypedValue(const std::string& encoded, Range<F32>& variable);
+    static Result StringToTypedValue(const std::string& encoded, Extent2D<U64>& variable);
+    static Result StringToTypedValue(const std::string& encoded, Extent2D<F32>& variable);
+
     template<typename T>
     static Result Encode(const T& variable, std::any& encoded) {
         using ValueType = std::remove_cvref_t<T>;
@@ -195,13 +308,52 @@ class JETSTREAM_API Parser {
         using ValueType = std::remove_cvref_t<T>;
 
         if (encoded.type() == typeid(ValueType)) {
-            JST_TRACE("Deserializing '{}': Trying to convert 'std::any' into 'T'.", name);
-
             variable = std::any_cast<const ValueType&>(encoded);
             return Result::SUCCESS;
         }
 
+        if constexpr (std::is_arithmetic_v<ValueType> && !std::is_same_v<ValueType, bool>) {
+            std::optional<Result> converted;
+            const auto convert = [&]<typename Source>() {
+                if (const auto* number = std::any_cast<Source>(&encoded)) {
+                    bool valid;
+                    if constexpr (std::is_integral_v<Source> && std::is_integral_v<ValueType>) {
+                        valid = std::in_range<ValueType>(*number);
+                    } else {
+                        const long double candidate = static_cast<long double>(*number);
+                        if constexpr (std::is_integral_v<ValueType>) {
+                            const long double upper = std::ldexp(1.0L, std::numeric_limits<ValueType>::digits);
+                            const long double lower = std::is_signed_v<ValueType> ? -upper : 0.0L;
+                            valid = std::isfinite(candidate) && candidate >= lower && candidate < upper &&
+                                    std::trunc(candidate) == candidate;
+                        } else {
+                            valid = !std::isfinite(candidate) ||
+                                    std::abs(candidate) <= std::numeric_limits<ValueType>::max();
+                        }
+                    }
+                    if (valid) {
+                        variable = static_cast<ValueType>(*number);
+                    } else {
+                        JST_ERROR("[PARSER] Numeric value for '{}' is out of range or not integral.", name);
+                    }
+                    converted = valid ? Result::SUCCESS : Result::ERROR;
+                }
+            };
+            convert.template operator()<I8>(); convert.template operator()<U8>();
+            convert.template operator()<I16>(); convert.template operator()<U16>();
+            convert.template operator()<I32>(); convert.template operator()<U32>();
+            convert.template operator()<I64>(); convert.template operator()<U64>();
+            convert.template operator()<F32>(); convert.template operator()<F64>();
+            if (converted) {
+                return *converted;
+            }
+        }
+
         if constexpr (detail::Optional<ValueType>) {
+            if (encoded.type() == typeid(std::nullptr_t)) {
+                variable.reset();
+                return Result::SUCCESS;
+            }
             using EntryType = typename ValueType::value_type;
             EntryType decoded{};
             JST_CHECK(Decode(encoded, name, decoded));
@@ -250,7 +402,9 @@ class JETSTREAM_API Parser {
             if (encoded.type() == typeid(std::string)) {
                 if constexpr (std::is_same_v<ValueType, std::vector<U64>> ||
                               std::is_same_v<ValueType, std::vector<F32>> ||
-                              std::is_same_v<ValueType, std::vector<F64>>) {
+                              std::is_same_v<ValueType, std::vector<F64>> ||
+                              std::is_same_v<ValueType, std::vector<CF32>> ||
+                              std::is_same_v<ValueType, std::vector<CF64>>) {
                     JST_CHECK(StringToTyped<ValueType>(std::any_cast<const std::string&>(encoded), variable));
                     return Result::SUCCESS;
                 }

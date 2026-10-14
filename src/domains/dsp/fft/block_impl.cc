@@ -16,11 +16,14 @@ struct FftImpl : public Block::Impl, public DynamicConfig<Blocks::Fft> {
 
 Result FftImpl::configure() {
     fftConfig->forward = forward;
+    fftConfig->complexOutput = complexOutput;
 
     return Result::SUCCESS;
 }
 
 Result FftImpl::define() {
+    const auto& config = *candidate();
+
     JST_CHECK(defineInterfaceInput("signal",
                                    "Input",
                                    "Input signal to transform."));
@@ -33,7 +36,21 @@ Result FftImpl::define() {
                                     "Direction",
                                     "Transform direction: Forward converts time-domain to "
                                     "frequency-domain, Inverse converts back.",
-                                    "dropdown:true(Forward),false(Inverse)"));
+                                    {{"type", "dropdown"}, {"options", Parser::Sequence{
+                                        Parser::Map{{"label", "Forward"}, {"value", "true"}},
+                                        Parser::Map{{"label", "Inverse"}, {"value", "false"}},
+                                    }}}));
+
+    const auto input = inputs().find("signal");
+    if (config.forward &&
+        input != inputs().end() &&
+        input->second.resolved() &&
+        input->second.tensor.dtype() == DataType::F32) {
+        JST_CHECK(defineInterfaceConfig("complexOutput",
+                                        "Complex Output",
+                                        "Output N/2 + 1 complex frequency bins.",
+                                        {{"type", "bool"}}));
+    }
 
     return Result::SUCCESS;
 }
@@ -47,6 +64,6 @@ Result FftImpl::create() {
     return Result::SUCCESS;
 }
 
-JST_REGISTER_BLOCK(FftImpl);
+JST_REGISTER_BLOCK(FftImpl, {"fft"});
 
 }  // namespace Jetstream::Blocks

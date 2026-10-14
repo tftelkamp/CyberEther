@@ -4,17 +4,17 @@
 #include <queue>
 #include <string>
 #include <mutex>
-#include <thread>
 #include <deque>
 #include <functional>
 #include <condition_variable>
 
 #include "jetstream/compositor.hh"
 #include "jetstream/instance.hh"
+#include "jetstream/platform.hh"
 
 namespace Jetstream {
 
-struct Compositor::Impl {
+struct JETSTREAM_API Compositor::Impl {
  public:
     virtual ~Impl() = default;
 
@@ -30,7 +30,7 @@ struct Compositor::Impl {
     std::shared_ptr<Viewport::Generic> viewport;
 
     // Worker thread.
-    std::thread workerThread;
+    Platform::WorkerThread workerThread;
     bool workerRunning = false;
 
     // Command queue.
@@ -39,6 +39,7 @@ struct Compositor::Impl {
         bool silent = false;
         Result result = Result::SUCCESS;
         std::string message;
+        std::function<void(Result)> onComplete;
     };
     std::queue<Command> commandPendingQueue;
     std::queue<Command> commandCompletedQueue;
@@ -48,7 +49,9 @@ struct Compositor::Impl {
 
     void startWorker();
     void stopWorker();
-    void enqueue(std::function<Result()> fn, bool silent = false);
+    void enqueue(std::function<Result()> fn,
+                 bool silent = false,
+                 std::function<void(Result)> onComplete = {});
     bool dequeue(Command& command);
 
     friend class Compositor;

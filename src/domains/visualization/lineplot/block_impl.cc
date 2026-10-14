@@ -1,7 +1,7 @@
 #include <jetstream/domains/visualization/lineplot/block.hh>
 #include <jetstream/detail/block_impl.hh>
 
-#include <jetstream/domains/visualization/lineplot/module.hh>
+#include <jetstream/domains/visualization/signal_view/module.hh>
 
 namespace Jetstream::Blocks {
 
@@ -11,15 +11,21 @@ struct LineplotImpl : public Block::Impl, public DynamicConfig<Blocks::Lineplot>
     Result create() override;
 
  protected:
-    std::shared_ptr<Modules::Lineplot> lineplotConfig = std::make_shared<Modules::Lineplot>();
+    std::shared_ptr<Modules::SignalView> signalViewConfig =
+        std::make_shared<Modules::SignalView>();
 };
 
 Result LineplotImpl::configure() {
-    lineplotConfig->averaging = averaging;
-    lineplotConfig->decimation = decimation;
-    lineplotConfig->numberOfVerticalLines = numberOfVerticalLines;
-    lineplotConfig->numberOfHorizontalLines = numberOfHorizontalLines;
-    lineplotConfig->thickness = thickness;
+    signalViewConfig->mode = "lineplot";
+    signalViewConfig->lineplotAveraging = averaging;
+    signalViewConfig->maxHold = maxHold;
+    signalViewConfig->fill = fill;
+    signalViewConfig->rangeMin = rangeMin;
+    signalViewConfig->rangeMax = rangeMax;
+    signalViewConfig->xLabel = xLabel;
+    signalViewConfig->amplitudeLabel = yLabel;
+    signalViewConfig->markers = markers;
+    signalViewConfig->pins = pins;
 
     return Result::SUCCESS;
 }
@@ -29,25 +35,27 @@ Result LineplotImpl::define() {
 
     JST_CHECK(defineInterfaceConfig("averaging",
                                     "Averaging",
-                                    "Number of samples to average for smoothing.",
-                                    "range:1:256:samples:int"));
+                                    "Trace smoothing factor.",
+                                    {{"type", "range"}, {"min", 1.0f}, {"max", 256.0f}, {"value_type", "uint"}}));
 
-    JST_CHECK(defineInterfaceConfig("decimation",
-                                    "Decimation",
-                                    "Decimation factor for input data.",
-                                    "range:1:64::int"));
+    JST_CHECK(defineInterfaceConfig("maxHold",
+                                    "Max Hold",
+                                    "Enable maximum hold trace.",
+                                    {{"type", "bool"}}));
 
     return Result::SUCCESS;
 }
 
 Result LineplotImpl::create() {
-    JST_CHECK(moduleCreate("lineplot", lineplotConfig, {
+    JST_CHECK(moduleCreate("signal_view", signalViewConfig, {
         {"signal", inputs().at("signal")}
     }));
+    JST_CHECK(moduleBindConfigEdit("signal_view", "markers", "markers"));
+    JST_CHECK(moduleBindConfigEdit("signal_view", "pins", "pins"));
 
     return Result::SUCCESS;
 }
 
-JST_REGISTER_BLOCK(LineplotImpl);
+JST_REGISTER_BLOCK(LineplotImpl, {"signal_view"});
 
 }  // namespace Jetstream::Blocks

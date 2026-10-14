@@ -30,7 +30,10 @@ Result CastImpl::define() {
     JST_CHECK(defineInterfaceConfig("outputType",
                                     "Output Type",
                                     "The desired output data type.",
-                                    "dropdown:CF32(CF32),F32(F32)"));
+                                    {{"type", "dropdown"}, {"options", Parser::Sequence{
+                                        Parser::Map{{"label", "CF32"}, {"value", "CF32"}},
+                                        Parser::Map{{"label", "F32"}, {"value", "F32"}},
+                                    }}}));
 
     return Result::SUCCESS;
 }
@@ -44,6 +47,6 @@ Result CastImpl::create() {
     return Result::SUCCESS;
 }
 
-JST_REGISTER_BLOCK(CastImpl);
+JST_REGISTER_BLOCK(CastImpl, {"cast"});
 
 }  // namespace Jetstream::Blocks

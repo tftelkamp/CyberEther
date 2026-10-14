@@ -47,7 +47,10 @@ class CudaBackend final : public CudaBufferBackend, public Backend {
         }
 
         if (config.hostAccessible) {
-            allocBytes = JST_PAGE_ALIGNED_SIZE(bytes);
+            if (!CheckedPageAlignedSize(bytes, allocBytes)) {
+                JST_ERROR("[MEMORY:BUFFER:CUDA] Allocation size {} is too large.", bytes);
+                return Result::ERROR;
+            }
             JST_CUDA_CHECK(cudaMallocManaged(&buffer, allocBytes), [&] {
                 JST_ERROR("[MEMORY:BUFFER:CUDA] Failed to allocate managed memory: {}.", err);
             });
@@ -61,6 +64,8 @@ class CudaBackend final : public CudaBufferBackend, public Backend {
             allocationProp.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
             allocationProp.location.id = state->getDeviceId();
             allocationProp.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+            allocationProp.allocFlags.gpuDirectRDMACapable =
+                state->hasRdmaMemorySupport() ? 1 : 0;
 
             U64 granularity = 0;
             JST_CUDA_CHECK(cuMemGetAllocationGranularity(&granularity,
@@ -69,7 +74,10 @@ class CudaBackend final : public CudaBufferBackend, public Backend {
                 JST_ERROR("[MEMORY:BUFFER:CUDA] Failed to get allocation granularity: {}.", err);
             });
 
-            allocBytes = JST_ROUND_UP(bytes, granularity);
+            if (!CheckedRoundUp(bytes, granularity, allocBytes)) {
+                JST_ERROR("[MEMORY:BUFFER:CUDA] Allocation size {} is too large.", bytes);
+                return Result::ERROR;
+            }
 
             JST_CUDA_CHECK(cuMemCreate(&allocHandle, allocBytes, &allocationProp, 0), [&] {
                 JST_ERROR("[MEMORY:BUFFER:CUDA] Failed to allocate device memory: {}.", err);
@@ -98,7 +106,10 @@ class CudaBackend final : public CudaBufferBackend, public Backend {
             locationState = Location::Device;
 #endif
         } else {
-            allocBytes = JST_PAGE_ALIGNED_SIZE(bytes);
+            if (!CheckedPageAlignedSize(bytes, allocBytes)) {
+                JST_ERROR("[MEMORY:BUFFER:CUDA] Allocation size {} is too large.", bytes);
+                return Result::ERROR;
+            }
             JST_CUDA_CHECK(cudaMalloc(&buffer, allocBytes), [&] {
                 JST_ERROR("[MEMORY:BUFFER:CUDA] Failed to allocate device memory: {}.", err);
             });
@@ -147,6 +158,12 @@ class CudaBackend final : public CudaBufferBackend, public Backend {
                 return Result::ERROR;
             }
 
+            U64 alignedSize = 0;
+            if (!CheckedPageAlignedSize(source.size(), alignedSize)) {
+                JST_ERROR("[MEMORY:BUFFER:CUDA] Source buffer is too large to import.");
+                return Result::ERROR;
+            }
+
             if (!JST_IS_ALIGNED(hostPtr)) {
                 JST_ERROR("[MEMORY:BUFFER:CUDA] CPU source pointer must be page aligned.");
                 return Result::ERROR;
@@ -170,15 +187,14 @@ class CudaBackend final : public CudaBufferBackend, public Backend {
             }
 
             if (needsHostRegistration) {
-                const auto registerSize = JST_PAGE_ALIGNED_SIZE(source.size());
-                JST_CUDA_CHECK(cudaHostRegister(hostPtr, registerSize, cudaHostRegisterPortable), [&] {
+                JST_CUDA_CHECK(cudaHostRegister(hostPtr, alignedSize, cudaHostRegisterPortable), [&] {
                     JST_ERROR("[MEMORY:BUFFER:CUDA] Failed to register host memory: {}.", err);
                 });
                 hostRegistrationOwned = true;
             }
 
             buffer = hostPtr;
-            allocBytes = JST_PAGE_ALIGNED_SIZE(source.size());
+            allocBytes = alignedSize;
             sizeBytes = source.size();
             borrowed = true;
             ownsMemory = false;
@@ -208,6 +224,12 @@ class CudaBackend final : public CudaBufferBackend, public Backend {
                 return Result::ERROR;
             }
 
+            U64 alignedSize = 0;
+            if (!CheckedPageAlignedSize(source.size(), alignedSize)) {
+                JST_ERROR("[MEMORY:BUFFER:CUDA] Source buffer is too large to import.");
+                return Result::ERROR;
+            }
+
             auto& device = vkState->getDevice();
 
             VkMemoryGetFdInfoKHR fdInfo = {};
@@ -229,7 +251,7 @@ class CudaBackend final : public CudaBufferBackend, public Backend {
             CUDA_EXTERNAL_MEMORY_HANDLE_DESC handleDesc = {};
             handleDesc.type = CU_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD;
             handleDesc.handle.fd = importedFd;
-            handleDesc.size = JST_PAGE_ALIGNED_SIZE(source.size());
+            handleDesc.size = alignedSize;
 
             JST_CUDA_CHECK(cuImportExternalMemory(&externalMemory, &handleDesc), [&] {
                 JST_ERROR("[MEMORY:BUFFER:CUDA] Failed to import Vulkan external memory: {}.", err);
@@ -237,7 +259,7 @@ class CudaBackend final : public CudaBufferBackend, public Backend {
 
             CUDA_EXTERNAL_MEMORY_BUFFER_DESC mappedBufferDesc = {};
             mappedBufferDesc.offset = 0;
-            mappedBufferDesc.size = JST_PAGE_ALIGNED_SIZE(source.size());
+            mappedBufferDesc.size = alignedSize;
 
             CUdeviceptr importedPtr = 0;
             JST_CUDA_CHECK(cuExternalMemoryGetMappedBuffer(&importedPtr, externalMemory, &mappedBufferDesc), [&] {

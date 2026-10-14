@@ -29,12 +29,12 @@ Result UnpadImpl::define() {
     JST_CHECK(defineInterfaceConfig("size",
                                     "Pad Size",
                                     "Number of elements to remove.",
-                                    "int:samples"));
+                                    {{"type", "uint"}, {"unit", "samples"}}));
 
     JST_CHECK(defineInterfaceConfig("axis",
                                     "Pad Axis",
-                                    "Dimension along which to remove padding.",
-                                    "int:"));
+                                    "Dimension along which to remove padding. Negative axes count from the end.",
+                                    {{"type", "int"}}));
 
     return Result::SUCCESS;
 }
@@ -49,6 +49,6 @@ Result UnpadImpl::create() {
     return Result::SUCCESS;
 }
 
-JST_REGISTER_BLOCK(UnpadImpl);
+JST_REGISTER_BLOCK(UnpadImpl, {"unpad"});
 
 }  // namespace Jetstream::Blocks

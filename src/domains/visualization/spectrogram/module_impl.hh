@@ -1,6 +1,8 @@
 #ifndef JETSTREAM_DOMAINS_VISUALIZATION_SPECTROGRAM_MODULE_IMPL_HH
 #define JETSTREAM_DOMAINS_VISUALIZATION_SPECTROGRAM_MODULE_IMPL_HH
 
+#include <optional>
+
 #include <jetstream/domains/visualization/spectrogram/module.hh>
 #include <jetstream/detail/module_impl.hh>
 #include <jetstream/surface.hh>
@@ -10,12 +12,12 @@
 #include <jetstream/render/base/program.hh>
 #include <jetstream/render/base/vertex.hh>
 #include <jetstream/render/base/draw.hh>
+#include <jetstream/render/colormap.hh>
 #include <jetstream/render/components/axis.hh>
 
 namespace Jetstream::Modules {
 
 constexpr F32 kSpectrogramDecayBase = 0.999f;
-constexpr F32 kSpectrogramMinTickSpacingPx = 65.0f;
 
 struct SpectrogramImpl : public Module::Impl, public DynamicConfig<Spectrogram> {
  public:
@@ -23,6 +25,7 @@ struct SpectrogramImpl : public Module::Impl, public DynamicConfig<Spectrogram> 
     Result define() override;
     Result create() override;
     Result destroy() override;
+    Result reconfigure() override;
 
  protected:
     Tensor input;
@@ -30,6 +33,12 @@ struct SpectrogramImpl : public Module::Impl, public DynamicConfig<Spectrogram> 
 
     U64 numberOfElements = 0;
     U64 numberOfBatches = 0;
+    U64 inputElementStride = 0;
+    U64 inputBatchStride = 0;
+    U64 validatedNumberOfElements = 0;
+    U64 validatedNumberOfBatches = 0;
+    U64 validatedInputElementStride = 0;
+    U64 validatedInputBatchStride = 0;
     F32 decayFactor = 0.0f;
 
     // Surface interaction state.
@@ -38,13 +47,13 @@ struct SpectrogramImpl : public Module::Impl, public DynamicConfig<Spectrogram> 
     // Rendering members.
 
     struct {
-        int width;
-        int height;
+        U32 width;
+        U32 height;
         float offset;
         float zoom;
         float paddingScaleX;
         float paddingScaleY;
-    } signalUniforms;
+    } signalUniforms{};
 
     std::shared_ptr<Render::Buffer> fillScreenVerticesBuffer;
     std::shared_ptr<Render::Buffer> fillScreenTextureVerticesBuffer;
@@ -53,7 +62,7 @@ struct SpectrogramImpl : public Module::Impl, public DynamicConfig<Spectrogram> 
     std::shared_ptr<Render::Buffer> signalUniformBuffer;
 
     std::shared_ptr<Render::Texture> framebufferTexture;
-    std::shared_ptr<Render::Texture> lutTexture;
+    Render::Colormap lut;
 
     std::shared_ptr<Render::Program> signalProgram;
 
@@ -68,7 +77,8 @@ struct SpectrogramImpl : public Module::Impl, public DynamicConfig<Spectrogram> 
     Result createPresent();
     Result destroyPresent();
     Result present();
-    Result updateAxisState();
+    Result updateAxisState(const std::optional<F32>& centerFrequency,
+                           const std::optional<F32>& sampleRate);
 };
 
 }  // namespace Jetstream::Modules

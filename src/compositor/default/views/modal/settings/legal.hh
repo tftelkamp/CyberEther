@@ -1,14 +1,14 @@
 #ifndef JETSTREAM_COMPOSITOR_IMPL_DEFAULT_VIEWS_MODAL_SETTINGS_LEGAL_HH
 #define JETSTREAM_COMPOSITOR_IMPL_DEFAULT_VIEWS_MODAL_SETTINGS_LEGAL_HH
 
-#include "jetstream/render/sakura/sakura.hh"
+#include "jetstream/render/sakura/base.hh"
 
 #include <functional>
 #include <string>
 
 namespace Jetstream {
 
-struct LegalSettingsPanel : public Sakura::Component {
+struct LegalSettingsPanel {
     struct Config {
         std::function<void()> onViewFullLicenses;
     };
@@ -90,26 +90,58 @@ struct LegalSettingsPanel : public Sakura::Component {
                    "- ImNodes - MIT License\n"
                    "- PocketFFT - BSD-3-Clause License\n"
                    "- RapidYAML - MIT License\n"
+                   "- toml++ - MIT License\n"
                    "- vkFFT - MIT License\n"
                    "- stb - MIT License\n"
                    "- fmtlib - MIT License\n"
                    "- SoapySDR - Boost Software License\n"
+                   "- libhackrf - BSD-3-Clause License\n"
+                   "- SoapyHackRF - MIT License\n"
+                   "- libbladeRF - LGPL-2.1-or-later License\n"
+                   "- SoapyBladeRF - LGPL-2.1-or-later License\n"
+                   "- Analog Devices no-OS - Analog Devices BSD-style License\n"
                    "- libmodes - BSD-2-Clause License\n"
+                   "- tree-sitter - MIT License\n"
+                   "- tree-sitter-python - MIT License\n"
+                   "- tree-sitter-markdown - MIT License\n"
+                   "- tree-sitter-yaml - MIT License\n"
+                   "- tree-sitter-bash - MIT License\n"
+                   "- tree-sitter-cpp - MIT License\n"
+                   "- tree-sitter-json - MIT License\n"
+                   "- ONNX Runtime - MIT License\n"
                    "- GLFW - zlib/libpng License\n"
                    "- imgui-notify - MIT License\n"
-                   "- spirv-cross - MIT License\n"
+                   "- spirv-cross - Apache License 2.0\n"
+                   "- Apple metal-cpp - Apache License 2.0\n"
                    "- glslang - BSD-3-Clause License\n"
                    "- naga - Apache License 2.0\n"
                    "- gstreamer - LGPL-2.1 License\n"
+                   "- PCRE2 - BSD-3-Clause WITH PCRE2-exception License\n"
+                   "- libffi - MIT License\n"
+                   "- GLib - LGPL-2.1-or-later License\n"
+                   "- libsrtp2 - BSD-3-Clause License\n"
+                   "- libvpx - BSD-3-Clause License\n"
+                   "- libnice - LGPL-2.1-or-later License\n"
+                   "- libgudev - LGPL-2.1-or-later License\n"
+                   "- gl-headers - MIT/Apache-2.0 License\n"
                    "- libusb - LGPL-2.1 License\n"
+                   "- libqrencode - LGPL-2.1-or-later License\n"
+                   "- zlib - zlib License\n"
+                   "- OpenSSL - Apache License 2.0\n"
                    "- Nanobench - MIT License\n"
                    "- Catch2 - Boost Software License\n"
+                   "- Font Awesome - Font Awesome Free License\n"
                    "- JetBrains Mono - SIL Open Font License 1.1\n"
-                   "- imgui_markdown - Zlib License\n"
-                   "- GLM - Happy Bunny License\n"
+                   "- Space Grotesk - SIL Open Font License 1.1\n"
+                   "- Inter - SIL Open Font License 1.1\n"
+                   "- GLM - Happy Bunny/MIT License\n"
                    "- cpp-httplib - MIT License\n"
                    "- nlohmann/json - MIT License\n"
+                   "- nanobind - BSD 3-Clause License\n"
+                   "- robin-map - MIT License\n"
+                   "- Google Turbo colormap - Apache License 2.0\n"
                    "- Natural Earth - Public Domain\n"
+                   "- Velopack - MIT License\n"
                    // [NEW DEPENDENCY HOOK]
         });
 

@@ -21,26 +21,41 @@ struct MenubarPresenter {
         const auto focusedFlowgraph = context.state.interface.focusedFlowgraph;
         const bool infoPanelEnabled = context.state.interface.infoPanelEnabled;
         const bool backgroundParticles = context.state.interface.backgroundParticles;
+        const bool flowgraphMetadataVisible = context.state.interface.flowgraphMetadataVisible;
+        const bool flowgraphEnvironmentVisible = context.state.interface.flowgraphEnvironmentVisible;
         const bool debugLatencyEnabled = context.state.debug.latencyEnabled;
-        const bool debugRuntimeMetricsEnabled = context.state.debug.runtimeMetricsEnabled;
+        const bool debugTimingEnabled = context.state.debug.timingEnabled;
+        const bool canCheckForUpdates = context.state.update.supported &&
+                                        !context.state.update.checking &&
+                                        !context.state.update.available &&
+                                        !context.state.update.downloading &&
+                                        !context.state.update.ready &&
+                                        !context.state.update.applying;
 
         return MenubarView::Config{
             .id = "main-menubar",
             .hasFocusedFlowgraph = focusedFlowgraph.has_value(),
             .infoPanelEnabled = infoPanelEnabled,
             .backgroundParticles = backgroundParticles,
+            .flowgraphMetadataVisible = flowgraphMetadataVisible,
+            .flowgraphEnvironmentVisible = flowgraphEnvironmentVisible,
             .remoteSupported = context.state.remote.supported,
             .debugLatencyEnabled = debugLatencyEnabled,
-            .debugRuntimeMetricsEnabled = debugRuntimeMetricsEnabled,
+            .debugTimingEnabled = debugTimingEnabled,
             .debugLogLevel = context.state.debug.logLevel,
+            .updateAvailable = context.state.update.available,
+            .updateReady = context.state.update.ready,
             .themes = BuildThemeKeys(),
             .currentThemeKey = context.state.sakura.themeKey,
             .onAction = [enqueue,
                          focusedFlowgraph,
                          infoPanelEnabled,
                          backgroundParticles,
+                         flowgraphMetadataVisible,
+                         flowgraphEnvironmentVisible,
                          debugLatencyEnabled,
-                         debugRuntimeMetricsEnabled](const MenubarView::Action action) {
+                         debugTimingEnabled,
+                         canCheckForUpdates](const MenubarView::Action action) {
                 switch (action) {
                     case MenubarView::Action::About:
                         enqueue(MailOpenModal{.content = ModalContent::About});
@@ -50,7 +65,13 @@ struct MenubarPresenter {
                         enqueue(MailOpenModal{.content = ModalContent::Settings, .settings = SettingsSection::Legal});
                         break;
                     case MenubarView::Action::CheckForUpdates:
-                        enqueue(MailCheckForUpdates{});
+                        enqueue(MailOpenModal{.content = ModalContent::Settings, .settings = SettingsSection::About});
+                        if (canCheckForUpdates) {
+                            enqueue(MailCheckForUpdates{});
+                        }
+                        break;
+                    case MenubarView::Action::OpenUpdateModal:
+                        enqueue(MailOpenModal{.content = ModalContent::Settings, .settings = SettingsSection::About});
                         break;
                     case MenubarView::Action::Preferences:
                         enqueue(MailOpenModal{.content = ModalContent::Settings, .settings = SettingsSection::General});
@@ -83,6 +104,24 @@ struct MenubarPresenter {
                             enqueue(MailNotify{.type = Sakura::ToastType::Error,
                                                .durationMs = 5000,
                                                .message = "No focused flowgraph to display information."});
+                        }
+                        break;
+                    case MenubarView::Action::ToggleFlowgraphMetadata:
+                        if (focusedFlowgraph.has_value()) {
+                            enqueue(MailSetFlowgraphMetadataVisible{.value = !flowgraphMetadataVisible});
+                        } else {
+                            enqueue(MailNotify{.type = Sakura::ToastType::Error,
+                                               .durationMs = 5000,
+                                               .message = "No focused flowgraph to display metadata."});
+                        }
+                        break;
+                    case MenubarView::Action::ToggleFlowgraphEnvironment:
+                        if (focusedFlowgraph.has_value()) {
+                            enqueue(MailSetFlowgraphEnvironmentVisible{.value = !flowgraphEnvironmentVisible});
+                        } else {
+                            enqueue(MailNotify{.type = Sakura::ToastType::Error,
+                                               .durationMs = 5000,
+                                               .message = "No focused flowgraph to display environment."});
                         }
                         break;
                     case MenubarView::Action::CloseFlowgraph:
@@ -120,11 +159,14 @@ struct MenubarPresenter {
                     case MenubarView::Action::OpenSettings:
                         enqueue(MailOpenModal{.content = ModalContent::Settings, .settings = SettingsSection::General});
                         break;
+                    case MenubarView::Action::OpenRemoteSettings:
+                        enqueue(MailOpenModal{.content = ModalContent::Settings, .settings = SettingsSection::Remote});
+                        break;
                     case MenubarView::Action::ToggleDebugLatency:
                         enqueue(MailSetDebugLatencyEnabled{.value = !debugLatencyEnabled});
                         break;
-                    case MenubarView::Action::ToggleRuntimeMetrics:
-                        enqueue(MailSetDebugRuntimeMetricsEnabled{.value = !debugRuntimeMetricsEnabled});
+                    case MenubarView::Action::ToggleTiming:
+                        enqueue(MailSetDebugTimingEnabled{.value = !debugTimingEnabled});
                         break;
                     case MenubarView::Action::ShowBenchmarks:
                         enqueue(MailOpenModal{.content = ModalContent::Benchmark});
@@ -133,7 +175,11 @@ struct MenubarPresenter {
                         enqueue(MailOpenModal{.content = ModalContent::Settings, .settings = SettingsSection::Developer});
                         break;
                     case MenubarView::Action::GettingStarted:
+                        enqueue(MailOpenUrl{.url = "https://cyberether.org/docs/quick-start", .notifyResult = true});
+                        break;
                     case MenubarView::Action::Documentation:
+                        enqueue(MailOpenUrl{.url = "https://cyberether.org/docs", .notifyResult = true});
+                        break;
                     case MenubarView::Action::OpenRepository:
                         enqueue(MailOpenUrl{.url = "https://github.com/luigifcruz/CyberEther", .notifyResult = true});
                         break;
@@ -142,6 +188,9 @@ struct MenubarPresenter {
                         break;
                     case MenubarView::Action::ReportIssue:
                         enqueue(MailOpenUrl{.url = "https://github.com/luigifcruz/CyberEther/issues", .notifyResult = true});
+                        break;
+                    case MenubarView::Action::SendFeedback:
+                        enqueue(MailOpenModal{.content = ModalContent::Feedback});
                         break;
                 }
             },

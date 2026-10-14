@@ -1,13 +1,16 @@
 #ifndef JETSTREAM_COMPOSITOR_IMPL_DEFAULT_VIEWS_WORKBENCH_HH
 #define JETSTREAM_COMPOSITOR_IMPL_DEFAULT_VIEWS_WORKBENCH_HH
 
+#include "flowgraph/key_value.hh"
 #include "flowgraph/window.hh"
+#include "file_picker.hh"
 #include "hud/info.hh"
 #include "hud/remote.hh"
 #include "hud/welcome.hh"
 #include "menubar.hh"
 #include "modal/container.hh"
 
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -16,17 +19,20 @@
 
 namespace Jetstream {
 
-struct WorkbenchView : public Sakura::Component {
+struct WorkbenchView {
     struct Config {
         bool filePending = false;
         bool backgroundParticles = true;
-        bool debugLatencyVisible = false;
-        InfoHudView::Config infoHud;
-        WelcomeHudView::Config welcomeHud;
-        RemoteHudView::Config remoteHud;
+        std::optional<Sakura::DebugWindow::Config> debugWindow;
+        std::optional<InfoHudView::Config> infoHud;
+        std::optional<WelcomeHudView::Config> welcomeHud;
+        std::optional<RemoteHudView::Config> remoteHud;
         MenubarView::Config menubar;
         ModalView::Config modal;
+        std::optional<FlowgraphKeyValueWindow::Config> flowgraphMetadata;
+        std::optional<FlowgraphKeyValueWindow::Config> flowgraphEnvironment;
         std::vector<FlowgraphWindow::Config> flowgraphs;
+        FilePickerView::Config filePicker;
     };
 
     void update(Config config) {
@@ -52,14 +58,19 @@ struct WorkbenchView : public Sakura::Component {
             return;
         }
 
-        infoHud.update(std::move(this->config.infoHud));
-        welcomeHud.update(std::move(this->config.welcomeHud));
-        remoteHud.update(std::move(this->config.remoteHud));
-        notifications.update({.id = "notifications"});
-        debugWindow.update({
-            .id = "latency-debug-window",
-            .visible = this->config.debugLatencyVisible,
-        });
+        if (this->config.infoHud.has_value()) {
+            infoHud.update(std::move(this->config.infoHud.value()));
+        }
+        if (this->config.welcomeHud.has_value()) {
+            welcomeHud.update(std::move(this->config.welcomeHud.value()));
+        }
+        if (this->config.remoteHud.has_value()) {
+            remoteHud.update(std::move(this->config.remoteHud.value()));
+        }
+        notifications.update({.id = "notifications", .topOffset = menuBarHeight});
+        if (this->config.debugWindow.has_value()) {
+            debugWindow.update(std::move(this->config.debugWindow.value()));
+        }
 
         auto menubarConfig = std::move(this->config.menubar);
         auto onHeight = std::move(menubarConfig.onHeight);
@@ -90,7 +101,15 @@ struct WorkbenchView : public Sakura::Component {
             flowgraphWindows.erase(flowgraphId);
         }
 
+        if (this->config.flowgraphMetadata.has_value()) {
+            flowgraphMetadataWindow.update(std::move(this->config.flowgraphMetadata.value()));
+        }
+        if (this->config.flowgraphEnvironment.has_value()) {
+            flowgraphEnvironmentWindow.update(std::move(this->config.flowgraphEnvironment.value()));
+        }
+
         modal.update(std::move(this->config.modal));
+        filePicker.update(std::move(this->config.filePicker));
     }
 
     void render(const Sakura::Context& ctx) {
@@ -102,11 +121,19 @@ struct WorkbenchView : public Sakura::Component {
             return;
         }
 
-        infoHud.render(ctx);
-        welcomeHud.render(ctx);
-        remoteHud.render(ctx);
+        if (config.infoHud.has_value()) {
+            infoHud.render(ctx);
+        }
+        if (config.welcomeHud.has_value()) {
+            welcomeHud.render(ctx);
+        }
+        if (config.remoteHud.has_value()) {
+            remoteHud.render(ctx);
+        }
         notifications.render(ctx);
-        debugWindow.render(ctx);
+        if (config.debugWindow.has_value()) {
+            debugWindow.render(ctx);
+        }
 
         menubar.render(ctx);
         workspaceBackground.render(ctx);
@@ -118,7 +145,15 @@ struct WorkbenchView : public Sakura::Component {
             }
         }
 
+        if (config.flowgraphMetadata.has_value()) {
+            flowgraphMetadataWindow.render(ctx);
+        }
+        if (config.flowgraphEnvironment.has_value()) {
+            flowgraphEnvironmentWindow.render(ctx);
+        }
+
         modal.render(ctx);
+        filePicker.render(ctx);
     }
 
  private:
@@ -135,7 +170,10 @@ struct WorkbenchView : public Sakura::Component {
     MenubarView menubar;
     std::vector<std::string> flowgraphOrder;
     std::unordered_map<std::string, FlowgraphWindow> flowgraphWindows;
+    FlowgraphKeyValueWindow flowgraphMetadataWindow;
+    FlowgraphKeyValueWindow flowgraphEnvironmentWindow;
     ModalView modal;
+    FilePickerView filePicker;
 };
 
 }  // namespace Jetstream

@@ -9,9 +9,10 @@
 
 #include "jetstream/block.hh"
 #include "jetstream/flowgraph.hh"
+#include "jetstream/flowgraph_metadata.hh"
+#include "jetstream/flowgraph_view.hh"
 
 #include <memory>
-#include <optional>
 #include <string>
 
 namespace Jetstream {
@@ -26,9 +27,9 @@ struct FlowgraphSurfacePresenter {
                        const std::string& flowgraphId,
                        const std::string& blockName,
                        const std::string& nodeViewId,
-                       const std::shared_ptr<Block>& blockPtr) const {
+                       const Flowgraph::View::BlockData& blockData) const {
         const auto enqueue = context.callbacks.enqueueMail;
-        for (const auto& surface : blockPtr->surfaces()) {
+        for (const auto& surface : blockData.surfaces) {
             for (const auto& manifest : surface->manifests()) {
                 if (!manifest.surface || manifest.surface->raw() == 0) {
                     continue;
@@ -36,26 +37,12 @@ struct FlowgraphSurfacePresenter {
 
                 const std::string surfaceMetaKey = "surface_" + manifest.id;
                 SurfaceMeta surfaceMeta;
-                flowgraph->getMeta(surfaceMetaKey, surfaceMeta, blockName);
-                std::optional<Extent2D<F32>> aspectRatioSize;
-                const SurfaceMeta defaultSurfaceMeta;
-                if (surfaceMeta.attachedWidth == defaultSurfaceMeta.attachedWidth &&
-                    surfaceMeta.attachedHeight == defaultSurfaceMeta.attachedHeight &&
-                    surfaceMeta.attachedWidth > 0 && surfaceMeta.attachedHeight > 0) {
-                    aspectRatioSize = Extent2D<F32>{
-                        static_cast<F32>(surfaceMeta.attachedWidth),
-                        static_cast<F32>(surfaceMeta.attachedHeight),
-                    };
-                }
+                flowgraph->metadata().get(surfaceMetaKey, surfaceMeta, blockName);
 
                 block.surfaces.push_back({
                     .id = nodeViewId + ":surface:" + manifest.id,
                     .texture = manifest.surface,
-                    .logicalSize = {
-                        static_cast<F32>(surfaceMeta.detachedWidth),
-                        static_cast<F32>(surfaceMeta.detachedHeight),
-                    },
-                    .aspectRatioSize = aspectRatioSize,
+                    .height = static_cast<F32>(surfaceMeta.attachedHeight),
                     .detached = surfaceMeta.detached,
                     .onDetach = [enqueue, flowgraphId, blockName, surfaceId = manifest.id]() {
                         enqueue(MailSetSurfaceDetached{
@@ -81,30 +68,6 @@ struct FlowgraphSurfacePresenter {
                                 .framebufferSize = resize.framebufferSize,
                                 .scale = resize.scale,
                             },
-                        });
-                    },
-                    .onDetachedSize = [enqueue,
-                                       surface,
-                                       flowgraphId,
-                                       surfaceMetaKey,
-                                       blockName](const Sakura::SurfaceResize& resize) {
-                        enqueue(MailResizeSurface{
-                            .surface = surface,
-                            .flowgraph = flowgraphId,
-                            .block = blockName,
-                            .metaKey = surfaceMetaKey,
-                            .placement = SurfacePlacement::Detached,
-                            .resize = {
-                                .logicalSize = resize.logicalSize,
-                                .framebufferSize = resize.framebufferSize,
-                                .scale = resize.scale,
-                            },
-                        });
-                    },
-                    .onMouse = [enqueue, surface](MouseEvent event) {
-                        enqueue(MailSurfaceMouse{
-                            .surface = surface,
-                            .event = event,
                         });
                     },
                 });

@@ -8,6 +8,49 @@
 
 namespace Jetstream::Modules {
 
+namespace {
+
+// Conservatively covers the largest per-point allocation in Shapes.
+constexpr U64 kShapeInstanceAllocationBytes = 32 * sizeof(F32);
+
+}  // namespace
+
+Result ConstellationImpl::validate() {
+    if (!inputs().contains("signal")) {
+        return Result::SUCCESS;
+    }
+
+    const Tensor& inputTensor = inputs().at("signal").tensor;
+    if (!inputTensor.validShape() || inputTensor.size() == 0) {
+        return Result::SUCCESS;
+    }
+
+    if (inputTensor.rank() == 0) {
+        JST_ERROR("[MODULE_CONSTELLATION] Input buffer rank is 0.");
+        return Result::ERROR;
+    }
+
+    if (inputTensor.rank() > 2) {
+        JST_ERROR("[MODULE_CONSTELLATION] Invalid input rank ({}), expected 1 or 2.",
+                  inputTensor.rank());
+        return Result::ERROR;
+    }
+
+    const U64 maxPointCount = std::min({
+        static_cast<U64>(std::numeric_limits<U32>::max()),
+        static_cast<U64>(std::numeric_limits<std::size_t>::max()) /
+            kShapeInstanceAllocationBytes,
+        static_cast<U64>(std::numeric_limits<std::ptrdiff_t>::max()) /
+            kShapeInstanceAllocationBytes,
+    });
+    if (inputTensor.size() > maxPointCount) {
+        JST_ERROR("[MODULE_CONSTELLATION] Point count exceeds the supported rendering range.");
+        return Result::ERROR;
+    }
+
+    return Result::SUCCESS;
+}
+
 Result ConstellationImpl::define() {
     JST_CHECK(defineTaint(Module::Taint::SURFACE));
 
@@ -21,27 +64,9 @@ Result ConstellationImpl::create() {
 
     input = inputs().at("signal").tensor;
 
-    // Check input rank.
-
-    if (input.rank() == 0) {
-        JST_ERROR("[MODULE_CONSTELLATION] Input buffer rank is 0.");
-        return Result::ERROR;
-    }
-
-    if (input.rank() > 2) {
-        JST_ERROR("[MODULE_CONSTELLATION] Invalid input rank ({}), expected 1 or 2.",
-                  input.rank());
-        return Result::ERROR;
-    }
-
     // Calculate number of points.
 
     numberOfPoints = input.size();
-
-    if (numberOfPoints == 0) {
-        JST_ERROR("[MODULE_CONSTELLATION] Input is empty.");
-        return Result::ERROR;
-    }
 
     return Result::SUCCESS;
 }
@@ -71,11 +96,11 @@ Result ConstellationImpl::createPresent() {
 
     {
         Render::Components::Axis::Config cfg;
-        cfg.numberOfVerticalLines = 5;
-        cfg.numberOfHorizontalLines = 5;
+        cfg.showFrameTicks = true;
         cfg.font = window->font("default_mono");
-        cfg.xTitle = "In-Phase";
-        cfg.yTitle = "Quadrature";
+        cfg.xTitle = xLabel;
+        cfg.yTitle = yLabel;
+        cfg.yLabelOnRight = true;
         JST_CHECK(window->build(axis, cfg));
         JST_CHECK(window->bind(axis));
     }
@@ -155,7 +180,7 @@ Result ConstellationImpl::present() {
     // Process surface interaction events.
 
     auto surfaceEvents = surfaceConsumeSurfaceEvents();
-    auto mouseEvents = surfaceConsumeMouseEvents();
+    auto inputEvents = surfaceConsumeInputEvents();
 
     interaction = ProcessSurfaceInteraction(interaction,
                                             std::move(surfaceEvents),
@@ -165,7 +190,10 @@ Result ConstellationImpl::present() {
                                              .enableCursor = false});
     interaction.offset = 0.0f;
 
-    for (const auto& event : mouseEvents) {
+    for (const auto& input : inputEvents) {
+        const auto mouse = SurfaceMouseEvent(input);
+        if (!mouse) continue;
+        const auto& event = *mouse;
         if (event.type == MouseEventType::Scroll) {
             const F32 newZoom = interaction.zoom * std::exp(event.scroll.y * kConstellationZoomSpeed);
 
@@ -214,18 +242,15 @@ Result ConstellationImpl::updateAxisState() {
     JST_CHECK(axis->updatePixelSize(pixelSize));
     JST_CHECK(shapes->updatePixelSize(pixelSize));
 
-    const U64 numVert = axis->getConfig().numberOfVerticalLines;
-    std::vector<std::string> xLabels(numVert - 2);
-
-    for (U64 i = 1; i < numVert - 1; i++) {
-        const F32 value = ((2.0f * static_cast<F32>(i) / static_cast<F32>(numVert - 1)) - 1.0f) /
-                          interaction.zoom;
-        xLabels[i - 1] = jst::fmt::format("{:.2f}", value);
-    }
-
-    JST_CHECK(axis->updateTickLabels(xLabels, {}));
-
     const auto& paddingScale = axis->paddingScale();
+    auto formatter = [zoom = interaction.zoom](const F32 position) {
+        return jst::fmt::format("{:.2f}", position / zoom);
+    };
+
+    axis->setShowFrameTicks(interaction.placement != SurfacePlacementType::Attached);
+
+    JST_CHECK(axis->updateTickFormatters(formatter, formatter));
+
     const auto& vs = interaction.viewSize;
     Render::ScissorRect plotRect;
     plotRect.x = static_cast<U32>((1.0f - paddingScale.x) / 2.0f * vs.x);

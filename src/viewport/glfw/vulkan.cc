@@ -1,9 +1,11 @@
-#include <csignal>
-
 #include "jetstream/viewport/platforms/glfw/vulkan.hh"
 #include "jetstream/backend/devices/vulkan/helpers.hh"
 
 #include <GLFW/glfw3.h>
+
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "tools/imgui_impl_glfw.h"
 
@@ -11,7 +13,15 @@ static void PrintGLFWError(int, const char* description) {
     JST_FATAL("[VULKAN] GLFW error: {}", description);
 }
 
-static bool keepRunningFlag;
+#ifndef JST_OS_WINDOWS
+static bool IsWaylandPlatform() {
+#ifdef GLFW_PLATFORM_WAYLAND
+    return glfwGetPlatform() == GLFW_PLATFORM_WAYLAND;
+#else
+    return false;
+#endif
+}
+#endif
 
 namespace Jetstream::Viewport {
 
@@ -26,34 +36,22 @@ Implementation::~GLFW() {
 }
 
 Result Implementation::create() {
-    // Register signal handler.
-
-    keepRunningFlag = true;
-    std::signal(SIGINT, [](int){
-        if (!keepRunningFlag) {
-            JST_DEBUG("[METAL] Exiting via SIGINT...");
-            std::exit(0);
-        }
-        keepRunningFlag = false;
-    });
-
     // Check if we are running in headless mode.
     JST_ASSERT(!Backend::State<DeviceType::Vulkan>()->headless(), "Headless mode is not supported.");
 
     // Initialize and configure GLFW.
 
-#ifdef GLFW_PLATFORM_WAYLAND
-    if (Backend::WindowMightBeWayland()) {
-        glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_WAYLAND);
-    }
-#endif
+    glfwSetErrorCallback(&PrintGLFWError);
 
     if (!glfwInit()) {
-        JST_ERROR("[VULKAN] Failed to initialize GLFW.");
+        const int error = glfwGetError(nullptr);
+        if (error == GLFW_PLATFORM_UNAVAILABLE) {
+            JST_ERROR("[VULKAN] No graphical display is available. Run with '--headless' when no desktop session is present.");
+        } else {
+            JST_ERROR("[VULKAN] Failed to initialize GLFW.");
+        }
         return Result::ERROR;
     }
-
-    glfwSetErrorCallback(&PrintGLFWError);
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
@@ -66,6 +64,22 @@ Result Implementation::create() {
         JST_ERROR("[VULKAN] Failed to create window with GLFW.");
         return Result::ERROR;
     }
+
+    glfwSetWindowUserPointer(window, this);
+    glfwSetDropCallback(window, [](GLFWwindow* handle, int count, const char** paths) {
+        auto* viewport = static_cast<Implementation*>(glfwGetWindowUserPointer(handle));
+        if (!viewport || count <= 0 || !paths) {
+            return;
+        }
+        std::vector<std::string> files;
+        files.reserve(static_cast<U64>(count));
+        for (int i = 0; i < count; ++i) {
+            if (paths[i]) {
+                files.emplace_back(paths[i]);
+            }
+        }
+        (void)viewport->addFileDropEvent(std::move(files));
+    });
 
     // Initialize variables.
     swapchain = VK_NULL_HANDLE;
@@ -371,12 +385,15 @@ VkSurfaceFormatKHR Implementation::chooseSwapSurfaceFormat(const std::vector<VkS
 }
 
 VkPresentModeKHR Implementation::chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes) {
+#ifdef JST_OS_WINDOWS
+    static_cast<void>(availablePresentModes);
+#endif
     if (config.vsync) {
         // TODO: Re-evaluate if we want MAILBOX.
 #ifndef JST_OS_WINDOWS
         for (const auto &availablePresentMode : availablePresentModes) {
             // HACK: Mailbox is not currently supported on Wayland.
-            if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR &&!Backend::WindowMightBeWayland()) {
+            if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR && !IsWaylandPlatform()) {
                 JST_DEBUG("[VULKAN] Swap mailbox presentation mode is available.");
                 return availablePresentMode;
             }
@@ -444,7 +461,7 @@ Result Implementation::pollEvents() {
 }
 
 bool Implementation::keepRunning() {
-    return (!glfwWindowShouldClose(window)) && keepRunningFlag;
+    return !glfwWindowShouldClose(window);
 }
 
 }  // namespace Jetstream::Viewport

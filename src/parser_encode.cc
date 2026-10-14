@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <vector>
+
 #include "jetstream/parser.hh"
 
 #include "jetstream/memory/types.hh"
@@ -10,15 +13,58 @@ namespace Jetstream {
 // TypedToString
 //
 
-Result Parser::TypedToString(const std::any& variable, std::string& encoded) {
+template<typename T>
+static std::string ComplexToString(const T& complex) {
+    return jst::fmt::format("{}{}{}",
+                            complex.real(),
+                            complex.imag() < 0 ? "-" : "+",
+                            std::abs(complex.imag()));
+}
+
+static Result EncodeTyped(const std::any& variable, std::string& encoded, const bool log) {
+    if (variable.type() == typeid(std::nullptr_t)) {
+        encoded = "null";
+        return Result::SUCCESS;
+    }
+
     if (variable.type() == typeid(std::string)) {
         const auto& stringValue = std::any_cast<std::string>(variable);
         encoded = jst::fmt::format("{}", stringValue);
         return Result::SUCCESS;
     }
 
+    if (variable.type() == typeid(I8)) {
+        encoded = jst::fmt::format("{}", static_cast<I32>(std::any_cast<I8>(variable)));
+        return Result::SUCCESS;
+    }
+
+    if (variable.type() == typeid(I16)) {
+        encoded = jst::fmt::format("{}", std::any_cast<I16>(variable));
+        return Result::SUCCESS;
+    }
+
     if (variable.type() == typeid(I32)) {
         encoded = jst::fmt::format("{}", std::any_cast<I32>(variable));
+        return Result::SUCCESS;
+    }
+
+    if (variable.type() == typeid(U8)) {
+        encoded = jst::fmt::format("{}", static_cast<U32>(std::any_cast<U8>(variable)));
+        return Result::SUCCESS;
+    }
+
+    if (variable.type() == typeid(U16)) {
+        encoded = jst::fmt::format("{}", std::any_cast<U16>(variable));
+        return Result::SUCCESS;
+    }
+
+    if (variable.type() == typeid(U32)) {
+        encoded = jst::fmt::format("{}", std::any_cast<U32>(variable));
+        return Result::SUCCESS;
+    }
+
+    if (variable.type() == typeid(I64)) {
+        encoded = jst::fmt::format("{}", std::any_cast<I64>(variable));
         return Result::SUCCESS;
     }
 
@@ -38,11 +84,12 @@ Result Parser::TypedToString(const std::any& variable, std::string& encoded) {
     }
 
     if (variable.type() == typeid(CF32)) {
-        const auto& complex = std::any_cast<CF32>(variable);
-        encoded = jst::fmt::format("{}{}{}",
-                                   complex.real(),
-                                   complex.imag() < 0 ? "-" : "+",
-                                   std::abs(complex.imag()));
+        encoded = ComplexToString(std::any_cast<CF32>(variable));
+        return Result::SUCCESS;
+    }
+
+    if (variable.type() == typeid(CF64)) {
+        encoded = ComplexToString(std::any_cast<CF64>(variable));
         return Result::SUCCESS;
     }
 
@@ -78,6 +125,28 @@ Result Parser::TypedToString(const std::any& variable, std::string& encoded) {
         return Result::SUCCESS;
     }
 
+    if (variable.type() == typeid(std::vector<CF32>)) {
+        const auto& values = std::any_cast<const std::vector<CF32>&>(variable);
+        std::vector<std::string> entries;
+        entries.reserve(values.size());
+        for (const auto& value : values) {
+            entries.push_back(ComplexToString(value));
+        }
+        encoded = jst::fmt::format("[{}]", jst::fmt::join(entries, ", "));
+        return Result::SUCCESS;
+    }
+
+    if (variable.type() == typeid(std::vector<CF64>)) {
+        const auto& values = std::any_cast<const std::vector<CF64>&>(variable);
+        std::vector<std::string> entries;
+        entries.reserve(values.size());
+        for (const auto& value : values) {
+            entries.push_back(ComplexToString(value));
+        }
+        encoded = jst::fmt::format("[{}]", jst::fmt::join(entries, ", "));
+        return Result::SUCCESS;
+    }
+
     if (variable.type() == typeid(std::vector<F64>)) {
         const auto& values = std::any_cast<std::vector<F64>>(variable);
         encoded = jst::fmt::format("[{}]", jst::fmt::join(values, ", "));
@@ -102,9 +171,56 @@ Result Parser::TypedToString(const std::any& variable, std::string& encoded) {
         return Result::SUCCESS;
     }
 
-    JST_ERROR("[PARSER] Failed to serialize variable. Check if the input and output are compatible.");
-    JST_TRACE("[PARSER] Variable type: {}", variable.type().name());
+    if (variable.type() == typeid(Parser::Map)) {
+        const auto& map = std::any_cast<const Parser::Map&>(variable);
+
+        std::vector<std::string> keys;
+        keys.reserve(map.size());
+        for (const auto& [key, _] : map) {
+            keys.push_back(key);
+        }
+        std::sort(keys.begin(), keys.end());
+
+        std::vector<std::string> entries;
+        entries.reserve(keys.size());
+        for (const auto& key : keys) {
+            std::string entry;
+            JST_CHECK(EncodeTyped(map.at(key), entry, log));
+            entries.push_back(jst::fmt::format("{}: {}", key, entry));
+        }
+
+        encoded = jst::fmt::format("{{{}}}", jst::fmt::join(entries, ", "));
+        return Result::SUCCESS;
+    }
+
+    if (variable.type() == typeid(Parser::Sequence)) {
+        const auto& sequence = std::any_cast<const Parser::Sequence&>(variable);
+
+        std::vector<std::string> entries;
+        entries.reserve(sequence.size());
+        for (const auto& value : sequence) {
+            std::string entry;
+            JST_CHECK(EncodeTyped(value, entry, log));
+            entries.push_back(std::move(entry));
+        }
+
+        encoded = jst::fmt::format("[{}]", jst::fmt::join(entries, ", "));
+        return Result::SUCCESS;
+    }
+
+    if (log) {
+        JST_ERROR("[PARSER] Failed to serialize variable. Check if the input and output are compatible.");
+        JST_TRACE("[PARSER] Variable type: {}", variable.type().name());
+    }
     return Result::ERROR;
+}
+
+Result Parser::TypedToString(const std::any& variable, std::string& encoded) {
+    return EncodeTyped(variable, encoded, true);
+}
+
+bool Parser::TryTypedToString(const std::any& variable, std::string& encoded) {
+    return EncodeTyped(variable, encoded, false) == Result::SUCCESS;
 }
 
 }  // namespace Jetstream

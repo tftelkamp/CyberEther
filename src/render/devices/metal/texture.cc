@@ -1,5 +1,7 @@
 #include "jetstream/render/devices/metal/texture.hh"
 
+#include <cstring>
+
 namespace Jetstream::Render {
 
 using Implementation = TextureImp<DeviceType::Metal>;
@@ -9,6 +11,10 @@ Implementation::TextureImp(const Config& config) : Texture(config) {
 
 Result Implementation::create() {
     JST_DEBUG("[METAL] Creating texture.");
+
+    if (config.buffer) {
+        JST_CHECK(validateFillRow(0, config.size.y));
+    }
 
     pixelFormat = ConvertPixelFormat(config.pfmt, config.ptype);
 
@@ -26,6 +32,7 @@ Result Implementation::create() {
     textureDesc->setUsage(MTL::TextureUsagePixelFormatView |
                           MTL::TextureUsageRenderTarget |
                           MTL::TextureUsageShaderRead);
+    textureDesc->setStorageMode(MTL::StorageModePrivate);
     auto device = Backend::State<DeviceType::Metal>()->getDevice();
     texture = device->newTexture(textureDesc);
     JST_ASSERT(texture, "Failed to create texture.");
@@ -59,32 +66,42 @@ Result Implementation::destroy() {
     return Result::SUCCESS;
 }
 
-bool Implementation::size(const Extent2D<U64>& size) {
-    if (size <= Extent2D<U64>{1, 1}) {
-        return false;
+Result Implementation::underlyingDump(uint8_t* output) const {
+    if (!texture) {
+        JST_ERROR("[METAL] Can't dump uninitialized texture.");
+        return Result::ERROR;
     }
 
-    if (config.size != size) {
-        config.size = size;
-        return true;
-    }
+    auto pool = NS::TransferPtr(NS::AutoreleasePool::alloc()->init());
 
-    return false;
-}
+    auto device = Backend::State<DeviceType::Metal>()->getDevice();
+    const U64 rowByteSize = config.size.x * pixelByteSize();
+    const U64 bufferByteSize = rowByteSize * config.size.y;
 
-Result Implementation::fill() {
-    return fillRow(0, config.size.y);
-}
+    auto buffer = NS::TransferPtr(device->newBuffer(bufferByteSize, MTL::ResourceStorageModeShared));
+    JST_ASSERT(buffer, "[METAL] Failed to create texture dump buffer.");
 
-Result Implementation::fillRow(const U64& y, const U64& height) {
-    if (height < 1) {
-        return Result::SUCCESS;
-    }
+    auto commandQueue = NS::TransferPtr(device->newCommandQueue());
+    JST_ASSERT(commandQueue, "[METAL] Failed to create texture dump command queue.");
 
-    auto region = MTL::Region::Make2D(0, y, config.size.x, height);
-    auto rowByteSize = config.size.x * GetPixelByteSize(texture->pixelFormat());
-    auto bufferByteOffset = rowByteSize * y;
-    texture->replaceRegion(region, 0, config.buffer + bufferByteOffset, rowByteSize);
+    auto commandBuffer = commandQueue->commandBuffer();
+    JST_ASSERT(commandBuffer, "[METAL] Failed to create texture dump command buffer.");
+
+    auto blitEncoder = commandBuffer->blitCommandEncoder();
+    JST_ASSERT(blitEncoder, "[METAL] Failed to create texture dump blit encoder.");
+
+    blitEncoder->copyFromTexture(texture, 0, 0,
+                                 MTL::Origin(0, 0, 0),
+                                 MTL::Size(config.size.x, config.size.y, 1),
+                                 buffer.get(), 0, rowByteSize, bufferByteSize);
+    blitEncoder->endEncoding();
+    commandBuffer->commit();
+    commandBuffer->waitUntilCompleted();
+
+    JST_ASSERT(commandBuffer->status() == MTL::CommandBufferStatusCompleted,
+               "[METAL] Texture dump command buffer did not complete.");
+
+    std::memcpy(output, buffer->contents(), bufferByteSize);
 
     return Result::SUCCESS;
 }
@@ -109,22 +126,6 @@ MTL::PixelFormat Implementation::ConvertPixelFormat(const PixelFormat& pfmt,
 
     JST_FATAL("Can't convert pixel format.");
     throw Result::FATAL;
-}
-
-U64 Implementation::GetPixelByteSize(const MTL::PixelFormat& pfmt) {
-    switch (pfmt) {
-        case MTL::PixelFormatR32Float:
-            return 4;
-        case MTL::PixelFormatR8Unorm:
-            return 1;
-        case MTL::PixelFormatRGBA32Float:
-            return 16;
-        case MTL::PixelFormatRGBA8Unorm:
-            return 4;
-        default:
-            JST_FATAL("Pixel format not implemented yet.");
-            throw Result::FATAL;
-    }
 }
 
 }  // namespace Jetstream::Render

@@ -11,7 +11,7 @@
 
 namespace Jetstream {
 
-struct Instance::Remote {
+struct JETSTREAM_API Instance::Remote {
  public:
     struct Impl;
     struct Supervisor;
@@ -59,24 +59,24 @@ struct Instance::Remote {
     const std::string& roomId() const;
     const std::string& accessToken() const;
     const std::string& inviteUrl() const;
-    const std::vector<ClientInfo>& clients() const;
-    const std::vector<std::string>& waitlist() const;
+    std::vector<ClientInfo> clients() const;
+    std::vector<std::string> waitlist() const;
 
-    Result updateWaitlist();
-    Result updateSessions();
     Result approveClient(const std::string& code);
 
  private:
     std::shared_ptr<Impl> impl;
 };
 
-std::string GetRemoteCodecName(const Instance::Remote::CodecType& codec);
-Instance::Remote::CodecType StringToRemoteCodec(const std::string& codec);
-const char* GetRemoteCodecPrettyName(const Instance::Remote::CodecType& codec);
+JETSTREAM_API std::string GetRemoteCodecName(const Instance::Remote::CodecType& codec);
+JETSTREAM_API Instance::Remote::CodecType StringToRemoteCodec(const std::string& codec);
+JETSTREAM_API const char* GetRemoteCodecPrettyName(const Instance::Remote::CodecType& codec);
 
-std::string GetRemoteEncoderName(const Instance::Remote::EncoderType& encoder);
-Instance::Remote::EncoderType StringToRemoteEncoder(const std::string& encoder);
-const char* GetRemoteEncoderPrettyName(const Instance::Remote::EncoderType& encoder);
+JETSTREAM_API bool IsRemoteBrokerSchemeSupported(const std::string& broker);
+
+JETSTREAM_API std::string GetRemoteEncoderName(const Instance::Remote::EncoderType& encoder);
+JETSTREAM_API Instance::Remote::EncoderType StringToRemoteEncoder(const std::string& encoder);
+JETSTREAM_API const char* GetRemoteEncoderPrettyName(const Instance::Remote::EncoderType& encoder);
 
 static inline constexpr std::array<Instance::Remote::CodecType, 4> RemoteCodecTypes = {
     Instance::Remote::CodecType::H264,

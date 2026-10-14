@@ -2,7 +2,7 @@
 #define JETSTREAM_COMPOSITOR_IMPL_DEFAULT_VIEWS_FLOWGRAPH_MODALS_EXAMPLES_HH
 
 #include "../../components/modal_header.hh"
-#include "jetstream/render/sakura/sakura.hh"
+#include "jetstream/render/sakura/base.hh"
 #include "jetstream/render/tools/imgui_icons_ext.hh"
 
 #include <functional>
@@ -11,7 +11,7 @@
 
 namespace Jetstream {
 
-struct FlowgraphExampleCell : public Sakura::Component {
+struct FlowgraphExampleCell {
     struct Config {
         std::string id;
         std::string title;
@@ -44,7 +44,6 @@ struct FlowgraphExampleCell : public Sakura::Component {
             .id = this->config.id + "Subtitle",
             .str = this->config.summary,
             .tone = Sakura::Text::Tone::Secondary,
-            .wrapped = true,
         });
     }
 
@@ -62,7 +61,7 @@ struct FlowgraphExampleCell : public Sakura::Component {
     Sakura::Text subtitle;
 };
 
-struct FlowgraphExamplesView : public Sakura::Component {
+struct FlowgraphExamplesView {
     struct Example {
         std::string key;
         std::string title;
@@ -80,7 +79,7 @@ struct FlowgraphExamplesView : public Sakura::Component {
         header.update({
             .id = "FlowgraphExamplesHeader",
             .title = ICON_FA_STORE " Flowgraph Examples",
-            .description = "Pick an example to bootstrap a new flowgraph. Examples open in a fresh tab so your work stays intact.",
+            .description = "Examples open in a fresh tab and start processing automatically once their inputs and devices are ready.",
         });
         emptyText.update({
             .id = "FlowgraphExamplesEmpty",

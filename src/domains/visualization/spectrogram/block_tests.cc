@@ -1,7 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <any>
 #include <string>
 
+#include "jetstream/domains/core/ones_tensor/block.hh"
 #include "jetstream/domains/dsp/signal_generator/block.hh"
 #include "jetstream/domains/visualization/spectrogram/block.hh"
 #include "flowgraph_fixture.hh"
@@ -22,20 +24,28 @@ TEST_CASE_METHOD(FlowgraphFixture,
 
     Blocks::Spectrogram config;
     config.height = 128;
+    config.xLabel = "Time";
+    config.yLabel = "Frequency";
 
     REQUIRE(flowgraph->blockCreate("spectrogram", config, inputs) == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("spectrogram")->state() ==
-            Block::State::Created);
-    REQUIRE(flowgraph->blockList().at("spectrogram")->outputs().empty());
+    const auto block = viewBlock("spectrogram");
+    REQUIRE(block.state == Block::State::Created);
+    REQUIRE(block.outputs.empty());
+    REQUIRE(std::any_cast<std::string>(block.config.at("xLabel")) == "Time");
+    REQUIRE(std::any_cast<std::string>(block.config.at("yLabel")) == "Frequency");
+    for (const auto& entry : block.interfaceConfigs) {
+        REQUIRE(entry.name != "xLabel");
+        REQUIRE(entry.name != "yLabel");
+    }
 
     auto result = flowgraph->blockDisconnect("spectrogram", "signal");
     REQUIRE((result == Result::SUCCESS || result == Result::INCOMPLETE));
-    REQUIRE(flowgraph->blockList().at("spectrogram")->state() ==
+    REQUIRE(viewBlock("spectrogram").state ==
             Block::State::Incomplete);
 
     REQUIRE(flowgraph->blockConnect("spectrogram", "signal", "src", "signal") ==
             Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("spectrogram")->state() ==
+    REQUIRE(viewBlock("spectrogram").state ==
             Block::State::Created);
 }
 
@@ -56,14 +66,87 @@ TEST_CASE_METHOD(FlowgraphFixture,
 
     Parser::Map config;
     config["height"] = std::string("64");
+    config["xLabel"] = std::string("Observation");
+    config["yLabel"] = std::string("Bin");
     REQUIRE(flowgraph->blockReconfigure("spectrogram", config) == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("spectrogram")->state() ==
-            Block::State::Created);
+    const auto reconfigured = viewBlock("spectrogram");
+    REQUIRE(reconfigured.state == Block::State::Created);
+    REQUIRE(std::any_cast<std::string>(reconfigured.config.at("xLabel")) ==
+            "Observation");
+    REQUIRE(std::any_cast<std::string>(reconfigured.config.at("yLabel")) == "Bin");
 
     Blocks::Spectrogram invalid;
     invalid.height = 0;
     REQUIRE(flowgraph->blockCreate("spectrogram_invalid", invalid, inputs) ==
             Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("spectrogram_invalid")->state() ==
+    REQUIRE(viewBlock("spectrogram_invalid").state ==
             Block::State::Errored);
+}
+
+TEST_CASE_METHOD(FlowgraphFixture,
+                  "Spectrogram block rejects inputs without signal roles",
+                 "[modules][spectrogram][block][validation]") {
+    Blocks::OnesTensor source;
+    source.shape = {2, 2, 2};
+    source.dataType = "F32";
+    REQUIRE(flowgraph->blockCreate("spectrogram_rank_src", source, {}) ==
+            Result::SUCCESS);
+
+    TensorMap inputs;
+    inputs["signal"].requested("spectrogram_rank_src", "buffer");
+
+    REQUIRE(flowgraph->blockCreate("spectrogram_rank", Blocks::Spectrogram{}, inputs) ==
+            Result::SUCCESS);
+    REQUIRE(viewBlock("spectrogram_rank").state == Block::State::Errored);
+}
+
+TEST_CASE_METHOD(FlowgraphFixture,
+                 "Spectrogram block delegates dtype validation to its module",
+                 "[modules][spectrogram][block][validation]") {
+    Blocks::SignalGenerator source;
+    source.bufferSize = 8;
+    source.signalDataType = "CF32";
+    REQUIRE(flowgraph->blockCreate("spectrogram_dtype_src", source, {}) ==
+            Result::SUCCESS);
+
+    TensorMap inputs;
+    inputs["signal"].requested("spectrogram_dtype_src", "signal");
+
+    REQUIRE(flowgraph->blockCreate("spectrogram_dtype",
+                                   Blocks::Spectrogram{}, inputs) == Result::SUCCESS);
+    REQUIRE(viewBlock("spectrogram_dtype").state == Block::State::Errored);
+}
+
+TEST_CASE_METHOD(FlowgraphFixture,
+                  "Spectrogram block preserves invalid height for recovery",
+                 "[modules][spectrogram][block][reconfigure][validation]") {
+    Blocks::SignalGenerator source;
+    source.signalDataType = "F32";
+    source.bufferSize = 64;
+    REQUIRE(flowgraph->blockCreate("spectrogram_update_src", source, {}) ==
+            Result::SUCCESS);
+
+    TensorMap inputs;
+    inputs["signal"].requested("spectrogram_update_src", "signal");
+
+    Blocks::Spectrogram config;
+    config.height = 128;
+    REQUIRE(flowgraph->blockCreate("spectrogram_update", config, inputs) ==
+            Result::SUCCESS);
+    REQUIRE(flowgraph->compute() == Result::SUCCESS);
+
+    Parser::Map update;
+    update["height"] = U64{0};
+    REQUIRE(flowgraph->blockReconfigure("spectrogram_update", update) == Result::SUCCESS);
+    REQUIRE(viewBlock("spectrogram_update").state == Block::State::Errored);
+
+    Parser::Map saved;
+    REQUIRE(flowgraph->blockConfig("spectrogram_update", saved) == Result::SUCCESS);
+    REQUIRE(std::any_cast<U64>(saved.at("height")) == 0);
+
+    Parser::Map recovery;
+    recovery["height"] = config.height;
+    REQUIRE(flowgraph->blockReconfigure("spectrogram_update", recovery) == Result::SUCCESS);
+    REQUIRE(viewBlock("spectrogram_update").state == Block::State::Created);
+    REQUIRE(flowgraph->compute() == Result::SUCCESS);
 }

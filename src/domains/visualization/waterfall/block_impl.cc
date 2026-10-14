@@ -1,7 +1,8 @@
 #include <jetstream/domains/visualization/waterfall/block.hh>
 #include <jetstream/detail/block_impl.hh>
 
-#include <jetstream/domains/visualization/waterfall/module.hh>
+#include <jetstream/domains/visualization/signal_view/module.hh>
+#include <jetstream/render/colormap.hh>
 
 namespace Jetstream::Blocks {
 
@@ -11,12 +12,19 @@ struct WaterfallImpl : public Block::Impl, public DynamicConfig<Blocks::Waterfal
     Result create() override;
 
  protected:
-    std::shared_ptr<Modules::Waterfall> waterfallConfig = std::make_shared<Modules::Waterfall>();
+    std::shared_ptr<Modules::SignalView> signalViewConfig =
+        std::make_shared<Modules::SignalView>();
 };
 
 Result WaterfallImpl::configure() {
-    waterfallConfig->height = height;
-    waterfallConfig->interpolate = interpolate;
+    signalViewConfig->mode = "waterfall";
+    signalViewConfig->waterfallAveraging = averaging;
+    signalViewConfig->waterfallHeight = height;
+    signalViewConfig->colormap = colormap;
+    signalViewConfig->xLabel = xLabel;
+    signalViewConfig->waterfallLabel = yLabel;
+    signalViewConfig->markers = markers;
+    signalViewConfig->pins = pins;
 
     return Result::SUCCESS;
 }
@@ -27,24 +35,31 @@ Result WaterfallImpl::define() {
     JST_CHECK(defineInterfaceConfig("height",
                                     "Height",
                                     "Number of rows in the waterfall history buffer.",
-                                    "int:rows"));
+                                    {{"type", "uint"}, {"unit", "rows"}}));
 
-    JST_CHECK(defineInterfaceConfig("interpolate",
-                                    "Interpolate",
-                                    "Enable texture interpolation for smoother display.",
-                                    "bool"));
+    JST_CHECK(defineInterfaceConfig("averaging",
+                                    "Averaging",
+                                    "Number of spectra averaged per displayed row.",
+                                    {{"type", "range"}, {"min", 1.0f}, {"max", 64.0f}, {"value_type", "uint"}}));
+
+    JST_CHECK(defineInterfaceConfig("colormap",
+                                    "Colormap",
+                                    "Color palette for amplitude.",
+                                    Render::Colormap::Format()));
 
     return Result::SUCCESS;
 }
 
 Result WaterfallImpl::create() {
-    JST_CHECK(moduleCreate("waterfall", waterfallConfig, {
+    JST_CHECK(moduleCreate("signal_view", signalViewConfig, {
         {"signal", inputs().at("signal")}
     }));
+    JST_CHECK(moduleBindConfigEdit("signal_view", "markers", "markers"));
+    JST_CHECK(moduleBindConfigEdit("signal_view", "pins", "pins"));
 
     return Result::SUCCESS;
 }
 
-JST_REGISTER_BLOCK(WaterfallImpl);
+JST_REGISTER_BLOCK(WaterfallImpl, {"signal_view"});
 
 }  // namespace Jetstream::Blocks

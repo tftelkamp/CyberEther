@@ -14,9 +14,8 @@
 namespace Jetstream::Render::Components {
 
 // TODO: Add support for zero-copy buffers.
-// TODO: Implement proper rotation.
 
-class Shapes : public Generic {
+class JETSTREAM_API Shapes : public Generic {
  public:
     enum class Type : uint32_t {
         TRIANGLE = 0,
@@ -63,8 +62,16 @@ class Shapes : public Generic {
     Result getSizes(const std::string& elementId, std::span<Extent2D<F32>>& sizes) const;
     Result updateSizes(const std::string& elementId = {});
 
+    // Updates an element's shared border/corner properties after build (they are
+    // otherwise fixed at create). Applies to every instance of the element.
+    Result updateProperties(const std::string& elementId,
+                            F32 cornerRadius,
+                            F32 borderWidth,
+                            const ColorRGBA<F32>& borderColor);
+
     Result updatePixelSize(const Extent2D<F32>& pixelSize);
     Result updateScissorRect(const std::optional<Render::ScissorRect>& rect);
+    void enabled(bool value);
 
     constexpr const Config& getConfig() const {
         return config;

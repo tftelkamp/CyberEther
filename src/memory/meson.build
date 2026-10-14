@@ -1,4 +1,6 @@
 src_lst += files([
+    'attributes.cc',
+    'axis.cc',
     'buffer_cpu.cc',
     'buffer_metal.cc',
     'buffer.cc',

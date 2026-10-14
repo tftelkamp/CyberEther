@@ -1,9 +1,18 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <any>
+#include <chrono>
 #include <filesystem>
+#include <limits>
+
+#include "jetstream/platform.hh"
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include "jetstream/block_interface.hh"
+#include "jetstream/domains/io/file_reader/block.hh"
 
 #include "flowgraph_fixture.hh"
 
@@ -13,7 +22,7 @@ namespace {
 
 std::filesystem::path TestFilePath(const std::string& suffix) {
     auto path = std::filesystem::temp_directory_path() /
-                ("jst_test_file_reader_block_" + suffix + ".raw");
+                Platform::PathFromUtf8("jst_test_file_reader_block_" + suffix + ".raw");
     return path;
 }
 
@@ -21,6 +30,29 @@ void Cleanup(const std::filesystem::path& path) {
     if (std::filesystem::exists(path)) {
         std::filesystem::remove(path);
     }
+}
+
+std::string MetricString(const Flowgraph& flowgraph,
+                         const std::string& block,
+                         const std::string& key) {
+    std::vector<Flowgraph::View::MetricEntry> metrics;
+    REQUIRE(flowgraph.view().metrics(block, metrics) == Result::SUCCESS);
+
+    for (const auto& metric : metrics) {
+        if (metric.name == key) {
+            return std::any_cast<std::string>(metric.value);
+        }
+    }
+
+    FAIL("Missing metric: " << key);
+    return {};
+}
+
+template<typename T>
+void WriteRawFile(const std::filesystem::path& path, const std::vector<T>& data) {
+    std::ofstream file(path, std::ios::binary);
+    file.write(reinterpret_cast<const char*>(data.data()),
+               static_cast<std::streamsize>(data.size() * sizeof(T)));
 }
 
 }  // namespace
@@ -39,22 +71,95 @@ TEST_CASE_METHOD(FlowgraphFixture,
     }
 
     Parser::Map config;
-    config["filepath"] = path.string();
+    config["filepath"] = Platform::PathToUtf8(path);
     config["dataType"] = std::string("F32");
     config["batchSize"] = std::string("4");
 
     REQUIRE(flowgraph->blockCreate("reader", "file_reader", config, {}) ==
             Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("reader")->state() == Block::State::Created);
+    REQUIRE(viewBlock("reader").state == Block::State::Created);
 
-    const Tensor& out = flowgraph->blockList().at("reader")
-                            ->outputs().at("signal").tensor;
+    const Tensor out = viewBlock("reader").outputs.at("signal").tensor;
     REQUIRE(out.dtype() == DataType::F32);
     REQUIRE(out.rank() == 1);
     REQUIRE(out.shape(0) == 4);
 
     REQUIRE(flowgraph->blockDestroy("reader", false) == Result::SUCCESS);
 
+    Cleanup(path);
+}
+
+TEST_CASE_METHOD(FlowgraphFixture,
+                 "FileReader block current bandwidth metric updates after a read",
+                 "[modules][io][file_reader][block][metrics]") {
+    const auto path = TestFilePath("bandwidth");
+    Cleanup(path);
+
+    std::vector<U8> data(8 * 1024 * 1024);
+    for (U64 i = 0; i < data.size(); ++i) {
+        data[i] = static_cast<U8>(i & 0xFF);
+    }
+    WriteRawFile(path, data);
+
+    Parser::Map config;
+    config["filepath"] = Platform::PathToUtf8(path);
+    config["dataType"] = std::string("U8");
+    config["batchSize"] = std::to_string(data.size());
+    config["loop"] = std::string("false");
+
+    REQUIRE(flowgraph->blockCreate("reader", "file_reader", config, {}) ==
+            Result::SUCCESS);
+
+    REQUIRE(MetricString(*flowgraph, "reader", "currentBandwidth") == "0.0 MB/s");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+
+    REQUIRE(flowgraph->compute() == Result::SUCCESS);
+
+    const auto metric = MetricString(*flowgraph, "reader", "currentBandwidth");
+    INFO("currentBandwidth=" << metric);
+    REQUIRE(metric != "N/A");
+    REQUIRE(metric != "0.0 MB/s");
+
+    REQUIRE(flowgraph->blockDestroy("reader", false) == Result::SUCCESS);
+
+    Cleanup(path);
+}
+
+TEST_CASE_METHOD(FlowgraphFixture,
+                 "FileReader block recovers after selecting a path",
+                 "[modules][io][file_reader][block][reconfigure]") {
+    const auto path = TestFilePath("select");
+    Cleanup(path);
+    WriteRawFile(path, std::vector<F32>{0.0f, 1.0f, 2.0f, 3.0f});
+
+    REQUIRE(flowgraph->blockCreate("reader", "file_reader", {}, {}) == Result::SUCCESS);
+    REQUIRE(viewBlock("reader").state == Block::State::Incomplete);
+    REQUIRE(viewBlock("reader").diagnostic.find("[MODULE_FILE_READER]") != std::string::npos);
+
+    TensorMap consumerInputs;
+    consumerInputs["buffer"].requested("reader", "signal");
+    REQUIRE(flowgraph->blockCreate("consumer", TestFlowgraph::kSyntheticPassType,
+                                   {}, consumerInputs) == Result::SUCCESS);
+    REQUIRE(viewBlock("consumer").state == Block::State::Incomplete);
+
+    Parser::Map selection;
+    selection["filepath"] = Platform::PathToUtf8(path);
+    selection["dataType"] = std::string("F32");
+    selection["batchSize"] = std::string("4");
+
+    REQUIRE(flowgraph->blockReconfigure("reader", selection) == Result::SUCCESS);
+    REQUIRE(viewBlock("reader").state == Block::State::Created);
+    REQUIRE(viewBlock("reader").outputs.at("signal").tensor.shape(0) == 4);
+    const auto consumer = viewBlock("consumer");
+    REQUIRE(consumer.state == Block::State::Created);
+    REQUIRE(consumer.inputs.at("buffer").resolved());
+    REQUIRE(consumer.inputs.at("buffer").external.has_value());
+    REQUIRE(consumer.inputs.at("buffer").external->block == "reader");
+    REQUIRE(consumer.inputs.at("buffer").external->port == "signal");
+
+    REQUIRE(flowgraph->blockDestroy("consumer", false) == Result::SUCCESS);
+    REQUIRE(flowgraph->blockDestroy("reader", false) == Result::SUCCESS);
     Cleanup(path);
 }
 
@@ -72,7 +177,7 @@ TEST_CASE_METHOD(FlowgraphFixture,
     }
 
     Parser::Map config;
-    config["filepath"] = path.string();
+    config["filepath"] = Platform::PathToUtf8(path);
     config["dataType"] = std::string("F32");
     config["batchSize"] = std::string("4");
     config["loop"] = std::string("true");
@@ -82,19 +187,38 @@ TEST_CASE_METHOD(FlowgraphFixture,
     Parser::Map loopOnly;
     loopOnly["loop"] = std::string("false");
     REQUIRE(flowgraph->blockReconfigure("reader", loopOnly) == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("reader")->state() == Block::State::Created);
+    REQUIRE(viewBlock("reader").state == Block::State::Created);
 
     Parser::Map resize;
-    resize["filepath"] = path.string();
+    resize["filepath"] = Platform::PathToUtf8(path);
     resize["dataType"] = std::string("F32");
     resize["batchSize"] = std::string("2");
     resize["loop"] = std::string("false");
     REQUIRE(flowgraph->blockReconfigure("reader", resize) == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("reader")->state() == Block::State::Created);
+    REQUIRE(viewBlock("reader").state == Block::State::Created);
 
-    const Tensor& out = flowgraph->blockList().at("reader")
-                            ->outputs().at("signal").tensor;
+    const Tensor out = viewBlock("reader").outputs.at("signal").tensor;
     REQUIRE(out.shape(0) == 2);
+
+    Parser::Map invalidResize;
+    invalidResize["batchSize"] =
+        std::to_string(std::numeric_limits<U64>::max());
+    REQUIRE(flowgraph->blockReconfigure("reader", invalidResize) ==
+            Result::SUCCESS);
+    REQUIRE(viewBlock("reader").state == Block::State::Errored);
+    REQUIRE(viewBlock("reader").outputs.empty());
+
+    Parser::Map saved;
+    REQUIRE(flowgraph->blockConfig("reader", saved) == Result::SUCCESS);
+    Blocks::FileReader savedConfig;
+    REQUIRE(savedConfig.deserialize(saved) == Result::SUCCESS);
+    REQUIRE(savedConfig.batchSize == std::numeric_limits<U64>::max());
+
+    Parser::Map recovery;
+    recovery["batchSize"] = U64{2};
+    REQUIRE(flowgraph->blockReconfigure("reader", recovery) == Result::SUCCESS);
+    REQUIRE(viewBlock("reader").state == Block::State::Created);
+    REQUIRE(viewBlock("reader").outputs.at("signal").tensor.shape(0) == 2);
 
     REQUIRE(flowgraph->blockDestroy("reader", false) == Result::SUCCESS);
 
@@ -109,6 +233,7 @@ TEST_CASE_METHOD(FlowgraphFixture,
 
     REQUIRE(flowgraph->blockCreate("reader_invalid", "file_reader", config,
                                    {}) == Result::SUCCESS);
-    REQUIRE(flowgraph->blockList().at("reader_invalid")->state() ==
+    REQUIRE(viewBlock("reader_invalid").state ==
             Block::State::Errored);
+    REQUIRE(viewBlock("reader_invalid").outputs.empty());
 }

@@ -20,7 +20,8 @@ CUDA::CUDA(const Config& config) : config(config), cache({}) {
         JST_FATAL("[CUDA] Cannot get device count: {}", err);
     });
     if (config.deviceId >= static_cast<U64>(deviceCount)) {
-       JST_FATAL("[CUDA] Cannot get desired device ID ({}).", config.deviceId);
+        JST_FATAL("[CUDA] Cannot get desired device ID ({}).", config.deviceId);
+        JST_CHECK_THROW(Result::ERROR);
     }
 
     // Setup device.
@@ -28,19 +29,24 @@ CUDA::CUDA(const Config& config) : config(config), cache({}) {
     JST_CUDA_CHECK_THROW(cuDeviceGet(&device, config.deviceId), [&]{
         JST_FATAL("[CUDA] Cannot get desired device ID ({}): {}", config.deviceId, err);
     });
-    JST_CUDA_CHECK_THROW(cudaSetDevice(config.deviceId), [&]{
-        JST_FATAL("[CUDA] Cannot get desired device ID ({}): {}", config.deviceId, err);
-    });
-#if CUDA_VERSION >= 13000
-    JST_CUDA_CHECK_THROW(cuCtxCreate(&context, nullptr, 0, device), [&]{
-        JST_FATAL("[CUDA] Cannot create context for device ID ({}): {}", config.deviceId, err);
-    });
-#else
-    JST_CUDA_CHECK_THROW(cuCtxCreate(&context, 0, device), [&]{
-        JST_FATAL("[CUDA] Cannot create context for device ID ({}): {}", config.deviceId, err);
-    });
-#endif
-    _isAvailable = true;
+
+    {
+        int supported = 0;
+        cache.hasRdmaMemorySupport = false;
+
+        const CUresult result = cuDeviceGetAttribute(&supported,
+                                                     CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
+                                                     device);
+
+        if (result == CUDA_SUCCESS) {
+            cache.hasRdmaMemorySupport = supported != 0;
+        } else if (result != CUDA_ERROR_INVALID_VALUE &&
+                   result != CUDA_ERROR_NOT_SUPPORTED) {
+            JST_FATAL("[CUDA] RDMA VMM capability query failed for device ID ({}): {}.",
+                      config.deviceId, static_cast<int>(result));
+            JST_CHECK_THROW(Result::ERROR);
+        }
+    }
 
     // Parse device information.
 
@@ -112,28 +118,48 @@ CUDA::CUDA(const Config& config) : config(config), cache({}) {
         cache.canImportHostMemory = query;
     }
 
+    JST_CUDA_CHECK_THROW(cudaSetDevice(config.deviceId), [&]{
+        JST_FATAL("[CUDA] Cannot get desired device ID ({}): {}", config.deviceId, err);
+    });
+    JST_CUDA_CHECK_THROW(cuDevicePrimaryCtxRetain(&context, device), [&]{
+        JST_FATAL("[CUDA] Cannot retain primary context for device ID ({}): {}", config.deviceId, err);
+    });
+    _isAvailable = true;
+
     // Print device information.
 
     JST_INFO("-----------------------------------------------------");
     JST_INFO("Jetstream Heterogeneous Backend [CUDA]")
     JST_INFO("-----------------------------------------------------");
+    JST_INFO("Device ID:          {}", getDeviceId());
     JST_INFO("Device Name:        {}", getDeviceName());
     JST_INFO("Device Type:        {}", getPhysicalDeviceType());
     JST_INFO("API Version:        {}", getApiVersion());
     JST_INFO("Compute Capability: {}", getComputeCapability());
     JST_INFO("Unified Memory:     {}", hasUnifiedMemory() ? "YES" : "NO");
+    JST_INFO("RDMA VMM Support:   {}", hasRdmaMemorySupport() ? "YES" : "NO");
     JST_INFO("Device Memory:      {:.2f} GB", static_cast<F32>(getPhysicalMemory()) / (1024*1024*1024));
     JST_INFO("Interoperability:");
     JST_INFO("  - Can Import Device Memory: {}", canImportDeviceMemory() ? "YES" : "NO");
     JST_INFO("  - Can Export Device Memory: {}", canExportDeviceMemory() ? "YES" : "NO");
-    JST_INFO("  - Can Export Host Memory:   {}", canImportHostMemory() ? "YES" : "NO");
+    JST_INFO("  - Can Import Host Memory:   {}", canImportHostMemory() ? "YES" : "NO");
     JST_INFO("-----------------------------------------------------");
 }
 
 CUDA::~CUDA() {
     if (_isAvailable) {
-        cuCtxDestroy(context);
+        cuDevicePrimaryCtxRelease(device);
     }
+}
+
+Result CUDA::activate() const {
+    JST_CUDA_CHECK(cudaSetDevice(config.deviceId), [&]{
+        JST_ERROR("[CUDA] Cannot activate device ID ({}): {}", config.deviceId, err);
+    });
+    JST_CUDA_CHECK(cuCtxSetCurrent(context), [&]{
+        JST_ERROR("[CUDA] Cannot activate context for device ID ({}): {}", config.deviceId, err);
+    });
+    return Result::SUCCESS;
 }
 
 bool CUDA::isAvailable() const {
@@ -158,6 +184,10 @@ PhysicalDeviceType CUDA::getPhysicalDeviceType() const {
 
 bool CUDA::hasUnifiedMemory() const {
     return cache.hasUnifiedMemory;
+}
+
+bool CUDA::hasRdmaMemorySupport() const {
+    return cache.hasRdmaMemorySupport;
 }
 
 bool CUDA::canExportDeviceMemory() const {

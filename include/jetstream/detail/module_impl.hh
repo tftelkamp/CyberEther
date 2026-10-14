@@ -1,11 +1,16 @@
 #ifndef JETSTREAM_MODULE_IMPL_HH
 #define JETSTREAM_MODULE_IMPL_HH
 
+#include <atomic>
+#include <mutex>
+#include <unordered_map>
+
 #include "jetstream/module.hh"
 #include "jetstream/module_context.hh"
 #include "jetstream/module_interface.hh"
 #include "jetstream/module_surface.hh"
 #include "jetstream/runtime.hh"
+#include "jetstream/tools/snapshot.hh"
 
 namespace Jetstream {
 
@@ -27,7 +32,7 @@ class DynamicConfig : public ConfigType {
 };
 #endif  // JETSTREAM_DYNAMIC_CONFIG_DEFINED
 
-struct Module::Impl {
+struct JETSTREAM_API Module::Impl {
  public:
     virtual ~Impl() = default;
 
@@ -44,6 +49,13 @@ struct Module::Impl {
     virtual Result create();
     virtual Result destroy();
     virtual Result reconfigure();
+
+    // User-originated edits.
+
+    Result requestConfigChange(const Parser::Map& config);
+    bool configChangeEnabled(const std::string& key) const;
+    bool configChangePending() const;
+    Result configChangeResult() const;
 
     // Identity
 
@@ -65,23 +77,36 @@ struct Module::Impl {
 
     // Components
 
-    std::shared_ptr<Render::Window>& render();
+    const std::shared_ptr<Render::Window>& render();
+    const std::shared_ptr<Flowgraph::Environment>& environment();
+    const std::shared_ptr<Flowgraph::Environment>& environment() const;
+    const std::shared_ptr<Flowgraph::View>& view();
+    const std::shared_ptr<Flowgraph::View>& view() const;
 
     // Surface
 
     Result surfaceCreateManifest(SurfaceManifest&& manifest);
     Result surfaceUpdateManifestSize(const std::string& id, const Extent2D<U64>& size);
-    std::vector<MouseEvent> surfaceConsumeMouseEvents();
+    std::vector<InputEvent> surfaceConsumeInputEvents();
     std::vector<SurfaceEvent> surfaceConsumeSurfaceEvents();
+    void surfaceSetCursor(SurfaceCursor cursor);
 
  private:
+    Result destroyImplementation();
+    void invalidateConfigChanges();
+
     // Identity
 
     std::string _name;
-    DeviceType _device;
-    RuntimeType _runtime;
+    DeviceType _device = DeviceType::None;
+    RuntimeType _runtime = RuntimeType::NONE;
     ProviderType _provider;
-    Taint _taint;
+    Module::State _state = Module::State::NONE;
+    Taint _taint = Taint::CLEAN;
+
+    // Timing
+
+    Tools::Snapshot<Timing> _timing;
 
     // I/O
 
@@ -100,7 +125,16 @@ struct Module::Impl {
     std::shared_ptr<Module::Config> _stagedConfig;
     std::shared_ptr<Module::Config> _candidateConfig;
 
+    mutable std::mutex _configChangeMutex;
+    std::unordered_map<std::string, std::string> _configChangeBindings;
+    Parser::Map _pendingConfigChanges;
+    bool _configChangeInFlight = false;
+    Result _configChangeResult = Result::SUCCESS;
+    std::shared_ptr<std::atomic<bool>> _configChangesPending;
+
     friend class Module;
+    friend class Block;
+    friend class Flowgraph;
 };
 
 }  // namespace Jetstream

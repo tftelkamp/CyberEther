@@ -16,6 +16,7 @@ Implementation::SurfaceImp(const Config& config) : Surface(config) {
     if (config.multisampled) {
         auto framebufferConfig = framebufferResolve->getConfig();
         framebufferConfig.multisampled = true;
+        framebufferConfig.buffer = nullptr;
         framebuffer = std::make_shared<TextureImp<DeviceType::Vulkan>>(framebufferConfig);
     }
 
@@ -81,6 +82,15 @@ Result Implementation::create() {
     dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
+    VkSubpassDependency sampledDependency{};
+    sampledDependency.srcSubpass = 0;
+    sampledDependency.dstSubpass = VK_SUBPASS_EXTERNAL;
+    sampledDependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    sampledDependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    sampledDependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
+    sampledDependency.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+    const VkSubpassDependency dependencies[] = {dependency, sampledDependency};
+
     std::vector<VkAttachmentDescription> colorAttachments;
     if (config.multisampled) {
         colorAttachments.push_back(colorAttachment);
@@ -93,14 +103,13 @@ Result Implementation::create() {
     renderPassInfo.pAttachments = colorAttachments.data();
     renderPassInfo.subpassCount = 1;
     renderPassInfo.pSubpasses = &subpass;
-    renderPassInfo.dependencyCount = 1;
-    renderPassInfo.pDependencies = &dependency;
+    renderPassInfo.dependencyCount = 2;
+    renderPassInfo.pDependencies = dependencies;
 
     JST_VK_CHECK(vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass), [&]{
         JST_ERROR("[VULKAN] Failed to create render pass.");
     });
 
-    JST_CHECK(framebufferResolve->create());
     if (config.multisampled) {
         JST_CHECK(framebuffer->create());
     }
@@ -134,6 +143,7 @@ Result Implementation::create() {
     });
 
     requestedSize = framebufferResolve->size();
+    resetFramebuffer();
 
     return Result::SUCCESS;
 }
@@ -153,7 +163,6 @@ Result Implementation::destroy() {
         JST_CHECK(program->destroy());
     }
 
-    JST_CHECK(framebufferResolve->destroy());
     if (config.multisampled) {
         JST_CHECK(framebuffer->destroy());
     }
@@ -163,8 +172,9 @@ Result Implementation::destroy() {
     return Result::SUCCESS;
 }
 
-Result Implementation::encode(VkCommandBuffer& commandBuffer) {
-    if (framebufferResolve->size(requestedSize)) {
+Result Implementation::prepare() {
+    framebufferChanged = framebufferResolve->size(requestedSize);
+    if (framebufferChanged) {
         JST_VK_CHECK(vkQueueWaitIdle(Backend::State<DeviceType::Vulkan>()->getGraphicsQueue()), [&]{
             JST_ERROR("[VULKAN] Can't wait for graphics queue to finish for surface destruction.");
         });
@@ -174,7 +184,17 @@ Result Implementation::encode(VkCommandBuffer& commandBuffer) {
         }
 
         JST_CHECK(destroy());
+        JST_CHECK(framebufferResolve->destroy());
+        JST_CHECK(framebufferResolve->create());
         JST_CHECK(create());
+    }
+
+    return Result::SUCCESS;
+}
+
+Result Implementation::encode(VkCommandBuffer& commandBuffer, bool visible) {
+    if (!shouldDraw(framebufferChanged)) {
+        return Result::SUCCESS;
     }
 
     // Encode kernels.
@@ -208,6 +228,10 @@ Result Implementation::encode(VkCommandBuffer& commandBuffer) {
 
     // Begin render pass.
 
+    if (!shouldDrawGraphics(visible)) {
+        return Result::SUCCESS;
+    }
+
     VkRenderPassBeginInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     renderPassInfo.renderPass = renderPass;
@@ -236,6 +260,9 @@ Result Implementation::encode(VkCommandBuffer& commandBuffer) {
     fullScissor.extent = {static_cast<U32>(framebufferResolve->size().x),
                           static_cast<U32>(framebufferResolve->size().y)};
     for (auto& program : programs) {
+        if (!program->enabled()) {
+            continue;
+        }
         vkCmdSetScissor(commandBuffer, 0, 1, &fullScissor);
         JST_CHECK(program->encode(commandBuffer, renderPass));
     }
@@ -245,12 +272,21 @@ Result Implementation::encode(VkCommandBuffer& commandBuffer) {
     return Result::SUCCESS;
 }
 
+void Implementation::commit() {
+    framebufferResolve->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (config.multisampled) {
+        framebuffer->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+    commitDraw();
+}
+
 const Extent2D<U64>& Implementation::size(const Extent2D<U64>& size) {
     if (!framebufferResolve) {
         return NullSize2D;
     }
 
     requestedSize = size;
+    invalidate();
 
     return framebufferResolve->size();
 }

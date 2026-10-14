@@ -1,6 +1,7 @@
 #ifndef JETSTREAM_COMPOSITOR_IMPL_DEFAULT_ACTIONS_WORKBENCH_HH
 #define JETSTREAM_COMPOSITOR_IMPL_DEFAULT_ACTIONS_WORKBENCH_HH
 
+#include "persist.hh"
 #include "../model/callbacks.hh"
 #include "../model/messages.hh"
 #include "../model/state.hh"
@@ -9,7 +10,6 @@
 #include "jetstream/settings.hh"
 #include "jetstream/platform.hh"
 
-#include <cstdlib>
 #include <string>
 #include <tuple>
 
@@ -23,6 +23,10 @@ struct WorkbenchActions {
                               MailNotifyResult,
                               MailOpenUrl,
                               MailCopyText,
+                              MailSetFlowgraphMetadataVisible,
+                              MailSetFlowgraphMetadataSearch,
+                              MailSetFlowgraphEnvironmentVisible,
+                              MailSetFlowgraphEnvironmentSearch,
                               MailQuit>;
 
     DefaultCompositorState& state;
@@ -48,10 +52,9 @@ struct WorkbenchActions {
             .render = state.system.render.get(),
         });
 
-        Settings settings;
-        JST_CHECK(Settings::Get(settings));
-        settings.interface.themeKey = state.sakura.themeKey;
-        JST_CHECK(Settings::Set(settings));
+        JST_CHECK(PersistSettings([&](Settings& settings) {
+            settings.interface.themeKey = state.sakura.themeKey;
+        }));
 
         return Result::SUCCESS;
     }
@@ -59,6 +62,11 @@ struct WorkbenchActions {
     Result handle(const MailOpenModal& msg) {
         state.modal.content = msg.content;
         state.modal.flowgraph = msg.flowgraph;
+        if (msg.content == ModalContent::Dependencies) {
+            state.modal.dependencyRequest = state.runtime.dependencyRequest;
+        } else {
+            state.modal.dependencyRequest.reset();
+        }
         if (msg.settings.has_value()) {
             state.settings.section = msg.settings.value();
         }
@@ -72,6 +80,7 @@ struct WorkbenchActions {
         state.modal.content.reset();
         state.modal.flowgraph.reset();
         state.modal.renameBlockOldName.reset();
+        state.modal.dependencyRequest.reset();
         return Result::SUCCESS;
     }
 
@@ -100,9 +109,34 @@ struct WorkbenchActions {
         return Result::SUCCESS;
     }
 
-    Result handle(const MailQuit&) {
-        std::exit(0);
+    Result handle(const MailSetFlowgraphMetadataVisible& msg) {
+        state.interface.flowgraphMetadataVisible = msg.value;
+        if (!msg.value) {
+            state.interface.flowgraphMetadataSearch.clear();
+        }
         return Result::SUCCESS;
+    }
+
+    Result handle(const MailSetFlowgraphMetadataSearch& msg) {
+        state.interface.flowgraphMetadataSearch = msg.value;
+        return Result::SUCCESS;
+    }
+
+    Result handle(const MailSetFlowgraphEnvironmentVisible& msg) {
+        state.interface.flowgraphEnvironmentVisible = msg.value;
+        if (!msg.value) {
+            state.interface.flowgraphEnvironmentSearch.clear();
+        }
+        return Result::SUCCESS;
+    }
+
+    Result handle(const MailSetFlowgraphEnvironmentSearch& msg) {
+        state.interface.flowgraphEnvironmentSearch = msg.value;
+        return Result::SUCCESS;
+    }
+
+    Result handle(const MailQuit&) {
+        return state.system.instance->requestStop();
     }
 };
 

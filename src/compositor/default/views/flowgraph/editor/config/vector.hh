@@ -3,73 +3,75 @@
 
 #include "types.hh"
 
-// TODO: Cleanup parsing.
-
 namespace Jetstream {
 
-struct FlowgraphConfigVectorField : public Sakura::Component {
+struct FlowgraphConfigVectorField {
     using Config = FlowgraphConfigFieldConfig;
 
-    void update(Config config) {
+    Result update(Config config) {
         this->config = std::move(config);
         if (this->config.format != parsedFormat) {
             parseFormat();
         }
-        if (this->config.encoded != parsedEncoded) {
+        const std::any nextValue = this->config.values.contains(this->config.name)
+            ? this->config.values.at(this->config.name) : std::any{};
+        if (!Parser::Equal(nextValue, parsedValue)) {
+            parsedValue.reset();
             floatValues.clear();
-            intValues.clear();
-            if (!this->config.encoded.empty()) {
-                if (valueType == "float") {
-                    Parser::StringToTyped(this->config.encoded, floatValues);
-                } else {
-                    Parser::StringToTyped(this->config.encoded, intValues);
-                }
+            uintValues.clear();
+            if (valueType == "float") {
+                JST_CHECK(Parser::Deserialize(this->config.values, this->config.name, floatValues));
+            } else if (valueType == "uint") {
+                JST_CHECK(Parser::Deserialize(this->config.values, this->config.name, uintValues));
             }
-            parsedEncoded = this->config.encoded;
+            parsedValue = nextValue;
         }
         updateChildren();
+        return Result::SUCCESS;
     }
 
     void render(const Sakura::Context& ctx) const {
-        if (valueType == "float") {
-            for (U64 i = 0; i < floatInputs.size(); ++i) {
-                floatFrames[i].render(ctx, [this, i](const Sakura::Context& ctx) {
-                    floatInputs[i].render(ctx);
-                });
-            }
-        } else if (valueType == "int") {
-            for (U64 i = 0; i < intInputs.size(); ++i) {
-                intFrames[i].render(ctx, [this, i](const Sakura::Context& ctx) {
-                    intInputs[i].render(ctx);
-                });
-            }
-        }
+        grid.render(ctx, items);
     }
 
  private:
     void parseFormat() {
         parsedFormat = config.format;
-        const auto parts = Parser::SplitString(config.format, ":");
-        valueType = (parts.size() > 1) ? parts[1] : "float";
-        unit = (parts.size() > 2) ? parts[2] : "";
-        precision = (parts.size() > 3 && !parts[3].empty()) ? std::stoi(parts[3]) : 2;
+        valueType = Parser::Get<std::string>(config.format, "value_type", "float");
+        unit = Parser::Get<std::string>(config.format, "unit");
+        precision = Parser::Get<I32>(config.format, "precision", 2);
+        multiplier = Parser::Get<F32>(config.format, "scale", 1.0f);
+        parsedValue.reset();
+        floatValues.clear();
+        uintValues.clear();
     }
 
     void updateChildren() {
+        grid.update({
+            .id = config.id + "Grid",
+        });
+        items.clear();
         floatFrames.clear();
         floatInputs.clear();
-        intFrames.clear();
-        intInputs.clear();
+        uintFrames.clear();
+        uintInputs.clear();
 
         if (valueType == "float") {
             floatFrames.resize(floatValues.size());
             floatInputs.resize(floatValues.size());
-            const F32 multiplier = ConfigUnitMultiplier(unit);
             for (U64 i = 0; i < floatValues.size(); ++i) {
                 floatFrames[i].update({
                     .id = config.id + "Frame" + std::to_string(i),
                     .label = config.label,
                     .help = config.help,
+                });
+                items.push_back({
+                    .child = [this, i](const Sakura::Context& ctx) {
+                        floatFrames[i].render(ctx, [this, i](const Sakura::Context& ctx) {
+                            floatInputs[i].render(ctx);
+                        });
+                    },
+                    .fullWidth = true,
                 });
                 floatInputs[i].update({
                     .id = config.id + "Float" + std::to_string(i),
@@ -77,40 +79,48 @@ struct FlowgraphConfigVectorField : public Sakura::Component {
                     .unit = unit,
                     .precision = precision,
                     .onChange = [this, i](F32 value) {
-                        auto values = config.values;
+                        Parser::Map patch;
                         auto nextValues = floatValues;
                         if (i < nextValues.size()) {
-                            nextValues[i] = value * ConfigUnitMultiplier(unit);
+                            nextValues[i] = value * multiplier;
                         }
-                        values[config.name] = nextValues;
+                        patch[config.name] = nextValues;
                         if (config.onApply) {
-                            config.onApply(std::move(values), false);
+                            config.onApply(std::move(patch), false);
                         }
                     },
                 });
             }
-        } else if (valueType == "int") {
-            intFrames.resize(intValues.size());
-            intInputs.resize(intValues.size());
-            for (U64 i = 0; i < intValues.size(); ++i) {
-                intFrames[i].update({
+        } else if (valueType == "uint") {
+            uintFrames.resize(uintValues.size());
+            uintInputs.resize(uintValues.size());
+            for (U64 i = 0; i < uintValues.size(); ++i) {
+                uintFrames[i].update({
                     .id = config.id + "Frame" + std::to_string(i),
                     .label = config.label,
                     .help = config.help,
                 });
-                intInputs[i].update({
-                    .id = config.id + "Int" + std::to_string(i),
-                    .value = intValues[i],
+                items.push_back({
+                    .child = [this, i](const Sakura::Context& ctx) {
+                        uintFrames[i].render(ctx, [this, i](const Sakura::Context& ctx) {
+                            uintInputs[i].render(ctx);
+                        });
+                    },
+                    .fullWidth = true,
+                });
+                uintInputs[i].update({
+                    .id = config.id + "UInt" + std::to_string(i),
+                    .value = uintValues[i],
                     .unit = unit,
                     .onChange = [this, i](U64 value) {
-                        auto values = config.values;
-                        auto nextValues = intValues;
+                        Parser::Map patch;
+                        auto nextValues = uintValues;
                         if (i < nextValues.size()) {
                             nextValues[i] = value;
                         }
-                        values[config.name] = nextValues;
+                        patch[config.name] = nextValues;
                         if (config.onApply) {
-                            config.onApply(std::move(values), false);
+                            config.onApply(std::move(patch), false);
                         }
                     },
                 });
@@ -119,17 +129,20 @@ struct FlowgraphConfigVectorField : public Sakura::Component {
     }
 
     Config config;
-    std::string parsedFormat;
-    std::string parsedEncoded;
+    Parser::Map parsedFormat;
+    std::any parsedValue;
+    F32 multiplier = 1.0f;
     std::string valueType = "float";
     std::string unit;
     int precision = 2;
     std::vector<F32> floatValues;
-    std::vector<U64> intValues;
+    std::vector<U64> uintValues;
+    Sakura::NodeFieldGrid grid;
+    std::vector<Sakura::NodeFieldGrid::Item> items;
     std::vector<Sakura::NodeField> floatFrames;
     std::vector<Sakura::NodeFloatInput> floatInputs;
-    std::vector<Sakura::NodeField> intFrames;
-    std::vector<Sakura::NodeIntInput> intInputs;
+    std::vector<Sakura::NodeField> uintFrames;
+    std::vector<Sakura::NodeUIntInput> uintInputs;
 };
 
 }  // namespace Jetstream

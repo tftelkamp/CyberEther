@@ -2,7 +2,11 @@
 #define JETSTREAM_COMPOSITOR_IMPL_DEFAULT_ACTIONS_BASE_HH
 
 #include "benchmark.hh"
+#include "dependencies.hh"
+#include "feedback.hh"
+#include "file_picker.hh"
 #include "flowgraph.hh"
+#include "live_markdown.hh"
 #include "remote.hh"
 #include "settings.hh"
 #include "stacks.hh"
@@ -13,6 +17,7 @@
 #include <memory>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 #include <variant>
 
 namespace Jetstream {
@@ -24,8 +29,12 @@ class DefaultActions {
         settings = std::make_shared<SettingsActions>(state, callbacks);
         benchmark = std::make_shared<BenchmarkActions>(state, callbacks);
         remote = std::make_shared<RemoteActions>(state, callbacks);
+        filePicker = std::make_shared<FilePickerActions>(state, callbacks);
         flowgraph = std::make_shared<FlowgraphActions>(state, callbacks);
-        stacks = std::make_shared<StackActions>(state, callbacks);
+        dependencies = std::make_shared<DependencyActions>(callbacks);
+        stacks = std::make_shared<StackActions>(state.flowgraph, callbacks);
+        liveMarkdown = std::make_shared<LiveMarkdownActions>(state.flowgraph);
+        feedback = std::make_shared<FeedbackActions>(state, callbacks);
     }
 
     Result handle(const Mail& mail) {
@@ -42,15 +51,44 @@ class DefaultActions {
         if (Handle(*remote, mail, result)) {
             return result;
         }
+        if (Handle(*filePicker, mail, result)) {
+            return result;
+        }
         if (Handle(*flowgraph, mail, result)) {
+            return result;
+        }
+        if (Handle(*dependencies, mail, result)) {
             return result;
         }
         if (Handle(*stacks, mail, result)) {
             return result;
         }
+        if (Handle(*feedback, mail, result)) {
+            return result;
+        }
 
         JST_ERROR("[COMPOSITOR_IMPL_DEFAULT] Unhandled mail.");
         return Result::ERROR;
+    }
+
+    Result requestFile(FilePickerRequest request) {
+        return filePicker->request(std::move(request));
+    }
+
+    void reconcileFilePicker() {
+        filePicker->reconcileAvailability();
+    }
+
+    void restoreStacks() {
+        stacks->restoreFromMetadata();
+    }
+
+    void refreshLiveMarkdown() {
+        liveMarkdown->refresh();
+    }
+
+    void cancelFilePicker() {
+        filePicker->cancel();
     }
 
  private:
@@ -72,11 +110,15 @@ class DefaultActions {
     }
 
     std::shared_ptr<BenchmarkActions> benchmark;
+    std::shared_ptr<DependencyActions> dependencies;
+    std::shared_ptr<FilePickerActions> filePicker;
     std::shared_ptr<FlowgraphActions> flowgraph;
+    std::shared_ptr<LiveMarkdownActions> liveMarkdown;
     std::shared_ptr<RemoteActions> remote;
     std::shared_ptr<SettingsActions> settings;
     std::shared_ptr<StackActions> stacks;
     std::shared_ptr<WorkbenchActions> workbench;
+    std::shared_ptr<FeedbackActions> feedback;
 };
 
 }  // namespace Jetstream

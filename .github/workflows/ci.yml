@@ -1,8 +1,10 @@
 name: CI
 
 on:
-  push:
+  pull_request:
     branches: ['**']
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -10,13 +12,16 @@ permissions:
 
 jobs:
   linux:
-    uses: ./.github/workflows/linux-build.yml
+    uses: ./.github/workflows/linux.yml
 
   windows:
-    uses: ./.github/workflows/windows-build.yml
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/windows.yml
 
   macos:
-    uses: ./.github/workflows/macos-build.yml
+    uses: ./.github/workflows/macos.yml
 
   emscripten:
-    uses: ./.github/workflows/emscripten-build.yml
+    uses: ./.github/workflows/emscripten.yml

@@ -4,15 +4,20 @@
 #include "jetstream/benchmark.hh"
 #include "jetstream/block.hh"
 #include "jetstream/flowgraph.hh"
+#include "jetstream/flowgraph_view.hh"
 #include "jetstream/instance.hh"
 #include "jetstream/instance_remote.hh"
 #include "jetstream/parser.hh"
 #include "jetstream/render/base/window.hh"
-#include "jetstream/render/sakura/sakura.hh"
+#include "jetstream/runtime_context_python.hh"
 #include "jetstream/viewport/adapters/generic.hh"
+
+#include "render/sakura/runtime.hh"
+#include "runtime/python/dependencies/coordinator.hh"
 
 #include "ui.hh"
 #include "meta.hh"
+#include "file_picker.hh"
 
 #include <future>
 #include <memory>
@@ -41,6 +46,10 @@ struct DefaultCompositorState {
         bool filePending = false;
         bool infoPanelEnabled = true;
         bool backgroundParticles = true;
+        bool flowgraphMetadataVisible = false;
+        std::string flowgraphMetadataSearch;
+        bool flowgraphEnvironmentVisible = false;
+        std::string flowgraphEnvironmentSearch;
 
         std::optional<std::string> focusedFlowgraph;
         std::optional<std::string> pendingFocusedFlowgraph;
@@ -56,22 +65,42 @@ struct DefaultCompositorState {
         SettingsSection section = SettingsSection::General;
     };
 
+    struct RuntimeState {
+        std::string pythonPath;
+        std::string dependencyPolicy = "prompt";
+        std::vector<PythonRuntimeContext::Candidate> pythonCandidates;
+        PythonRuntimeContext::Validation pythonValidation;
+        PythonRuntimeContext::Validation initialPythonValidation;
+        PythonDependencyRequest dependencyRequest;
+        U64 dependencyGeneration = 0;
+    };
+
     struct ModalState {
         std::optional<ModalContent> content;
         std::optional<std::string> flowgraph;
         std::optional<std::string> renameBlockOldName;
+        std::optional<PythonDependencyRequest> dependencyRequest;
     };
 
     struct DebugState {
         int logLevel = JST_LOG_DEBUG_DEFAULT_LEVEL;
         bool latencyEnabled = false;
-        bool runtimeMetricsEnabled = false;
+        bool timingEnabled = false;
     };
 
     struct UpdateState {
+        bool supported = false;
+        bool upToDate = false;
+        bool failed = false;
         bool checking = false;
         bool available = false;
+        bool downloading = false;
+        bool ready = false;
+        bool applying = false;
+        F32 progress = 0.0f;
         std::string version;
+        std::string releaseNotes;
+        std::string message;
     };
 
     struct FlowgraphState {
@@ -81,8 +110,21 @@ struct DefaultCompositorState {
             bool dockInMainDockspace = true;
         };
 
+        struct BlockSnapshot {
+            std::string name;
+            Flowgraph::View::BlockData data;
+        };
+
+        static std::string LiveMarkdownKey(const std::string& flowgraphId,
+                                           const std::string& blockName,
+                                           const std::string& fieldName) {
+            return flowgraphId + ":" + blockName + ":" + fieldName;
+        }
+
         std::unordered_map<std::string, std::shared_ptr<Flowgraph>> items;
         std::unordered_map<std::string, std::unordered_map<std::string, StackWindowState>> stacks;
+        std::unordered_map<std::string, std::vector<BlockSnapshot>> blocks;
+        std::unordered_map<std::string, std::string> liveMarkdown;
     };
 
     struct ClipboardState {
@@ -97,6 +139,7 @@ struct DefaultCompositorState {
     struct BenchmarkState {
         bool running = false;
         F32 progress = 0.0f;
+        std::string selectedModule;
         Benchmark::ResultMapType results;
         std::future<void> future;
         std::stringstream output;
@@ -119,11 +162,36 @@ struct DefaultCompositorState {
         std::vector<std::string> waitlist;
     };
 
+    struct FilePickerState {
+        bool active = false;
+        bool overwritePending = false;
+        U64 generation = 0;
+        FilePickerMode mode = FilePickerMode::Open;
+        std::string root;
+        std::string directory;
+        std::string selectedPath;
+        std::string filename;
+        std::string error;
+        std::vector<std::string> extensions;
+        std::vector<FilePickerEntry> entries;
+    };
+
+    struct FeedbackState {
+        enum class Status {
+            Idle,
+            Submitting,
+        };
+
+        Status status = Status::Idle;
+        std::string text;
+    };
+
     SystemState system;
     SakuraState sakura;
     InterfaceState interface;
     GraphicsState graphics;
     SettingsState settings;
+    RuntimeState runtime;
     ModalState modal;
     DebugState debug;
     UpdateState update;
@@ -131,6 +199,8 @@ struct DefaultCompositorState {
     BenchmarkState benchmark;
     ClipboardState clipboard;
     RemoteState remote;
+    FilePickerState filePicker;
+    FeedbackState feedback;
 };
 
 }  // namespace Jetstream
