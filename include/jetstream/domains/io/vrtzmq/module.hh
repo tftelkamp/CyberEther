@@ -20,7 +20,8 @@ struct VrtZmq : public Module::Config {
     U64 vrt_rate = 0;
 
     JST_MODULE_TYPE(vrtzmq);
-    JST_MODULE_PARAMS(numberOfTimeSamples,
+    JST_MODULE_PARAMS(numberOfBatches,
+                      numberOfTimeSamples,
                       bufferMultiplier,
                       hostName, vrt_instance, vrt_channel, vrt_frequency, vrt_rate);
 };

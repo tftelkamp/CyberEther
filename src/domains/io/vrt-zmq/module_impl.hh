@@ -1,5 +1,5 @@
-#ifndef JETSTREAM_DOMAINS_IO_SOAPY_MODULE_IMPL_HH
-#define JETSTREAM_DOMAINS_IO_SOAPY_MODULE_IMPL_HH
+#ifndef JETSTREAM_DOMAINS_IO_VRTZMQ_MODULE_IMPL_HH
+#define JETSTREAM_DOMAINS_IO_VRTZMQ_MODULE_IMPL_HH
 
 #include <thread>
 #include <atomic>
@@ -33,14 +33,12 @@ struct VrtZmqImpl : public Module::Impl, public DynamicConfig<VrtZmq> {
     Tensor buffer;
 
     // VRT
-    int64_t current_freq;
-    uint32_t current_sample_rate;
+    std::atomic<int64_t> current_freq{0};
+    std::atomic<uint32_t> current_sample_rate{0};
 
     // VRT ZMQ
     void *context = NULL;
     void *subscriber = NULL;
-
-    uint32_t sample_counter = 0;
 
     std::thread producer;
     std::atomic<bool> errored{false};
@@ -56,4 +54,4 @@ struct VrtZmqImpl : public Module::Impl, public DynamicConfig<VrtZmq> {
 
 }  // namespace Jetstream::Modules
 
-#endif  // JETSTREAM_DOMAINS_IO_SOAPY_MODULE_IMPL_HH
+#endif  // JETSTREAM_DOMAINS_IO_VRTZMQ_MODULE_IMPL_HH

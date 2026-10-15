@@ -62,37 +62,37 @@ Result VrtZmqImpl::define() {
     JST_CHECK(defineInterfaceConfig("hostName",
                                     "VRT ZMQ host",
                                     "VRT ZMQ host",
-                                    "text"));
+                                    {{"type", "text"}}));
 
     JST_CHECK(defineInterfaceConfig("vrt_instance",
                                     "VRT instance",
                                     "VRT instance",
-                                    "int:instance"));
+                                    {{"type", "uint"}, {"unit", ""}}));
 
      JST_CHECK(defineInterfaceConfig("vrt_channel",
                                     "VRT channel",
                                     "VRT channel",
-                                    "int:channel"));
+                                    {{"type", "uint"}, {"unit", ""}}));
 
     JST_CHECK(defineInterfaceConfig("numberOfBatches",
                                     "Batches",
                                     "Number of batches in output buffer.",
-                                    "int:batches"));
+                                    {{"type", "uint"}, {"unit", "batches"}}));
 
     JST_CHECK(defineInterfaceConfig("numberOfTimeSamples",
                                     "Samples",
                                     "Number of samples per batch.",
-                                    "int:samples"));
+                                    {{"type", "uint"}, {"unit", "samples"}}));
 
     JST_CHECK(defineInterfaceConfig("bufferMultiplier",
                                     "Buffer Multiplier",
                                     "Internal buffer size multiplier.",
-                                    "int:x"));
+                                    {{"type", "uint"}, {"unit", "x"}}));
 
     JST_CHECK(defineInterfaceMetric("VRTFreq",
                                     "VRT Frequency",
                                     "VRT Frequency.",
-                                    "label",
+                                    {{"type", "label"}},
         [this]() -> std::any {
             if (!moduleImpl) {
                 return std::string("N/A");
@@ -104,7 +104,7 @@ Result VrtZmqImpl::define() {
      JST_CHECK(defineInterfaceMetric("VRTRate",
                                     "VRT Sample Rate",
                                     "VRT Sample Rate.",
-                                    "label",
+                                    {{"type", "label"}},
         [this]() -> std::any {
             if (!moduleImpl) {
                 return std::string("N/A");
@@ -116,7 +116,7 @@ Result VrtZmqImpl::define() {
     JST_CHECK(defineInterfaceMetric("bufferHealth",
                                     "Buffer Health",
                                     "Current buffer occupancy level.",
-                                    "progressbar",
+                                    {{"type", "progressbar"}},
         [this]() -> std::any {
             if (!moduleImpl) {
                 return std::pair<std::string, F32>{"0.0%", 0.0f};
@@ -129,7 +129,7 @@ Result VrtZmqImpl::define() {
     JST_CHECK(defineInterfaceMetric("throughput",
                                     "Throughput",
                                     "Current data throughput.",
-                                    "label",
+                                    {{"type", "label"}},
         [this]() -> std::any {
             if (!moduleImpl) {
                 return std::string("N/A");

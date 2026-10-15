@@ -12,6 +12,12 @@
 
 #include "vrt-tools.h"
 
+#include <algorithm>
+#include <vector>
+
+#include <jetstream/memory/axis.hh>
+#include <jetstream/tools/numeric.hh>
+
 namespace Jetstream::Modules {
 
 Result VrtZmqImpl::define() {
@@ -34,20 +40,30 @@ Result VrtZmqImpl::create() {
     context = zmq_ctx_new();
     subscriber = zmq_socket(context, ZMQ_SUB);
     int rc = zmq_setsockopt (subscriber, ZMQ_RCVHWM, &hwm, sizeof hwm);
+    // Block in zmq_recv, but wake up periodically so destroy() can stop the thread.
+    int rcvtimeo = 100;
+    rc = zmq_setsockopt(subscriber, ZMQ_RCVTIMEO, &rcvtimeo, sizeof rcvtimeo);
     std::string connect_string = "tcp://" + hostName + ":" + std::to_string(main_port);
     rc = zmq_connect(subscriber, connect_string.c_str());
-    assert(rc == 0);
+    // assert(rc == 0);
     zmq_setsockopt(subscriber, ZMQ_SUBSCRIBE, "", 0);
 
     JST_CHECK(buffer.create(device(), DataType::CF32, {numberOfBatches, numberOfTimeSamples}));
 
+    JST_CHECK(SetSignalAxes(buffer, {
+            .sample = Index{1},
+            .batch = Index{0},
+        }));
+
     outputs()["signal"].produced(name(), "signal", buffer);
 
-    buffer.setAttribute("frequency", (F32)current_freq);
-    buffer.setAttribute("sampleRate", (F32)current_sample_rate);
+    buffer.setAttribute("frequency", static_cast<F32>(current_freq.load()));
+    buffer.setAttribute("sampleRate", static_cast<F32>(current_sample_rate.load()));
 
-    circularBuffer.resize(buffer.size() * bufferMultiplier);
+    JST_CHECK(circularBuffer.resize(buffer.size() * bufferMultiplier));
 
+    // Set before the thread starts so an early destroy() can stop it.
+    streaming = true;
     producer = std::thread([this] {
         try {
             JST_CHECK_THROW(VrtThreadLoop());
@@ -93,10 +109,9 @@ Result VrtZmqImpl::reconfigure() {
 
 Result VrtZmqImpl::VrtThreadLoop() {
 
-    CF32 tmp[10000];
-
     // VRT
-    uint32_t zmq_buffer[ZMQ_BUFFER_SIZE];
+    std::vector<uint32_t> zmq_buffer(ZMQ_BUFFER_SIZE / sizeof(uint32_t));
+    std::vector<CF32> tmp(zmq_buffer.size());
 
     context_type vrt_context;
     packet_type vrt_packet;
@@ -107,16 +122,16 @@ Result VrtZmqImpl::VrtThreadLoop() {
 
     bool start_rx = false;
 
-    sample_counter = 0;
-    streaming = true;
-
     while (streaming) {
         try {
-            int len = zmq_recv(subscriber, zmq_buffer, ZMQ_BUFFER_SIZE, ZMQ_DONTWAIT);
+            const int len = zmq_recv(subscriber, zmq_buffer.data(), ZMQ_BUFFER_SIZE, 0);
 
             if (streaming && len > 0) {
+                // zmq_recv returns the full message size even when truncated.
+                const auto words = static_cast<uint32_t>(
+                    std::min<std::size_t>(len, ZMQ_BUFFER_SIZE) / sizeof(uint32_t));
 
-                if (not vrt_process(zmq_buffer, sizeof(zmq_buffer), &vrt_context, &vrt_packet)) {
+                if (not vrt_process(zmq_buffer.data(), words, &vrt_context, &vrt_packet)) {
                     printf("Not a Vita49 packet?\n");
                     continue;
                 }
@@ -124,48 +139,45 @@ Result VrtZmqImpl::VrtThreadLoop() {
                 if (vrt_packet.context) {
                     if (current_sample_rate != vrt_context.sample_rate) {
                         current_sample_rate = vrt_context.sample_rate;
-                        buffer.setAttribute("sampleRate", (F32)current_sample_rate);
+                        buffer.setAttribute("sampleRate", static_cast<F32>(vrt_context.sample_rate));
                     }
                     if (current_freq != vrt_context.rf_freq) {
                         current_freq = vrt_context.rf_freq;
-                        buffer.setAttribute("frequency", (F32)current_freq);
+                        buffer.setAttribute("frequency", static_cast<F32>(vrt_context.rf_freq));
                     }
                     start_rx = true;
                 }
 
                 if (vrt_packet.data && start_rx && streaming && !errored) {
 
-                    for (uint32_t i = 0; i < vrt_packet.num_rx_samps; i++) {
+                    const uint32_t samples = std::min<uint32_t>(
+                        vrt_packet.num_rx_samps,
+                        words > vrt_packet.offset ? words - vrt_packet.offset : 0);
+
+                    for (uint32_t i = 0; i < samples; i++) {
 
                         int16_t re;
                         memcpy(&re, (char*)&zmq_buffer[vrt_packet.offset+i], 2);
                         int16_t img;
                         memcpy(&img, (char*)&zmq_buffer[vrt_packet.offset+i]+2, 2);
 
-                        tmp[sample_counter] = std::complex((float)re / 32768.0, (float)img / 32768.0);
-                        sample_counter++;
-                        
-                        if (sample_counter == numberOfTimeSamples) {
-                            circularBuffer.put(tmp, numberOfTimeSamples);
-                            sample_counter = 0;
-                        }
-                        
+                        tmp[i] = CF32((float)re / 32768.0f, (float)img / 32768.0f);
                     }
 
-                    const U64 capacity = circularBuffer.getCapacity();
+                    JST_CHECK(circularBuffer.push(tmp.data(), samples));
+
+                    const U64 capacity = circularBuffer.capacity();
                     if (capacity > 0) {
-                        const F32 newHealth = static_cast<F32>(circularBuffer.getOccupancy()) /
+                        const F32 newHealth = static_cast<F32>(circularBuffer.size()) /
                                               static_cast<F32>(capacity);
                         const F32 smoothedHealth = bufferHealth.get() * 0.99f + newHealth * 0.01f;
                         bufferHealth.publish(smoothedHealth);
                     }
-                    const F32 actualMB = static_cast<F32>(circularBuffer.getThroughput() * sizeof(CF32)) / 1e6f;
-                    const F32 expectedMB = (current_sample_rate * sizeof(CF32)) / 1e6f;
+                    const F32 actualMB = static_cast<F32>(circularBuffer.throughput() * sizeof(CF32)) / 1e6f;
+                    const F32 expectedMB = (current_sample_rate.load() * sizeof(CF32)) / 1e6f;
                     throughput.publish({actualMB, expectedMB});
                 }
             }
-
-            usleep(5);
 
         } catch (const std::exception& e) {
             JST_ERROR("[MODULE_VRTZMQ] Failed to read stream: {}", e.what());

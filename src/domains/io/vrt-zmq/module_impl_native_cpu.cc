@@ -1,3 +1,5 @@
+#include <chrono>
+
 #include <jetstream/runtime_context_native_cpu.hh>
 #include <jetstream/scheduler_context.hh>
 #include <jetstream/module_context.hh>
@@ -24,8 +26,15 @@ Result VrtZmqImplNativeCpu::create() {
 }
 
 Result VrtZmqImplNativeCpu::hasPendingCompute() {
-    if (circularBuffer.getOccupancy() < buffer.size()) {
-        return circularBuffer.waitBufferOccupancy(buffer.size());
+    if (errored) {
+        return Result::ERROR;
+    }
+
+    if (circularBuffer.size() < buffer.size()) {
+        // Keep waits bounded so receive-thread failures reach the scheduler.
+        const auto result = circularBuffer.waitForSize(buffer.size(),
+                                                       std::chrono::milliseconds(100));
+        return errored ? Result::ERROR : result;
     }
 
     return Result::SUCCESS;
@@ -36,11 +45,12 @@ Result VrtZmqImplNativeCpu::computeSubmit() {
         return Result::ERROR;
     }
 
-    if (circularBuffer.getOccupancy() < buffer.size()) {
+    if (circularBuffer.size() < buffer.size()) {
         return Result::YIELD;
     }
 
-    circularBuffer.get(reinterpret_cast<CF32*>(buffer.data()), buffer.size());
+    JST_CHECK(circularBuffer.pop(
+        reinterpret_cast<CF32*>(buffer.data()), buffer.size()));
 
     return Result::SUCCESS;
 }
