@@ -17,11 +17,24 @@
 namespace Jetstream {
 
 struct FlowgraphEditor {
+    struct Measured {
+        struct Node {
+            Rect bounds;
+            Extent2D<F32> size;
+            std::optional<Extent2D<F32>> content;
+        };
+
+        std::unordered_map<std::string, Node> nodes;
+        Rect viewport;
+        Rect toolbar;
+    };
+
     struct Config {
         std::string id;
         bool clipboardHasData = false;
         bool debugTimingEnabled = false;
         bool openBlockPicker = false;
+        bool measure = false;
         std::function<std::vector<FlowgraphBlockPicker::BlockOption>()> onBuildBlockOptions;
 
         std::string title;
@@ -41,12 +54,11 @@ struct FlowgraphEditor {
         std::function<void(const std::string&, DeviceType, RuntimeType, ProviderType)> onChangeBlockDevice;
         std::function<void(const std::string&, const std::string&, const std::string&, const std::string&)> onConnectBlock;
         std::function<void(const std::string&, const std::string&)> onDisconnectBlock;
-        std::function<void(const std::string&, Parser::Map, bool)> onReconfigureBlock;
+        std::function<void(const std::string&, Parser::Map, bool, std::function<void(Result)>)> onReconfigureBlock;
         std::function<void(Result, std::string)> onConfigError;
         std::function<void(bool, std::vector<std::string>, std::function<void(std::string)>)> onBrowseConfigPath;
         std::function<void(const std::string&, F32, F32, F32, F32, std::optional<FlowgraphNode::Layout>)> onNodeLayout;
-        std::function<void(const std::string&, Rect, Extent2D<F32>, std::optional<Extent2D<F32>>)> onNodeBounds;
-        std::function<void(Rect)> onViewport;
+        std::function<void(Measured)> onLayout;
         std::function<void(const std::string&, bool)> onNodeConfigCollapse;
         std::function<void(const std::string&, bool)> onNodeConfigDetach;
     };
@@ -97,8 +109,8 @@ struct FlowgraphEditor {
             .onViewportGridChange = [this](Rect viewport) {
                 viewportGridCenter = {viewport.x + viewport.width * 0.5f,
                                       viewport.y + viewport.height * 0.5f};
-                if (this->config.onViewport) {
-                    this->config.onViewport(viewport);
+                if (this->config.measure) {
+                    measured.viewport = viewport;
                 }
             },
         });
@@ -163,9 +175,10 @@ struct FlowgraphEditor {
                 pinIdToInfo[nodeId][pinKey(FlowgraphPinId(output.port.id), false)] = {block.name, output.port.id, false};
             }
             for (auto& field : nodeBlock.configFields) {
-                field.onApply = [onReconfigureBlock, blockName = block.name](Parser::Map values, const bool silent) {
+                field.onApply = [onReconfigureBlock, blockName = block.name](
+                    Parser::Map values, const bool silent, std::function<void(Result)> onComplete) {
                     if (onReconfigureBlock) {
-                        onReconfigureBlock(blockName, std::move(values), silent);
+                        onReconfigureBlock(blockName, std::move(values), silent, std::move(onComplete));
                     }
                 };
                 field.onError = this->config.onConfigError;
@@ -199,7 +212,7 @@ struct FlowgraphEditor {
                 },
                 .onInspectApply = [this, blockName = block.name](Parser::Map values) {
                     if (this->config.onReconfigureBlock) {
-                        this->config.onReconfigureBlock(blockName, std::move(values), false);
+                        this->config.onReconfigureBlock(blockName, std::move(values), false, {});
                     }
                 },
                 .onDelete = [this, blockName = block.name]() {
@@ -227,8 +240,8 @@ struct FlowgraphEditor {
                 .onBounds = [this, blockName = block.name](Rect bounds,
                                                            Extent2D<F32> size,
                                                            std::optional<Extent2D<F32>> content) {
-                    if (this->config.onNodeBounds) {
-                        this->config.onNodeBounds(blockName, bounds, size, content);
+                    if (this->config.measure) {
+                        measured.nodes[blockName] = {bounds, size, content};
                     }
                 },
                 .onConfigCollapse = [this, blockName = block.name](bool collapsed) {
@@ -346,6 +359,11 @@ struct FlowgraphEditor {
         });
         suppressEditorDoubleClick = false;
 
+        if (config.measure && config.onLayout) {
+            config.onLayout(std::move(measured));
+        }
+        measured = {};
+
         if (flowgraphContextMenuOpen) {
             flowgraphContextMenu.render(ctx, [&](const Sakura::Context& ctx) {
                 flowgraphPasteMenuItem.render(ctx);
@@ -430,6 +448,7 @@ struct FlowgraphEditor {
     Extent2D<F32> flowgraphContextMenuGridPos;
     Extent2D<F32> mouseGridPosition;
     Extent2D<F32> viewportGridCenter;
+    Measured measured;
     std::unordered_map<std::string, std::unordered_map<std::string, PinInfo>> pinIdToInfo;
     std::unordered_map<std::string, std::string> nodeIdToBlockName;
     std::unordered_map<std::string, FlowgraphLink::Connection> linkIdToConnection;

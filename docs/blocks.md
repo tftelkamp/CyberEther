@@ -1,7 +1,7 @@
 ---
 title: Blocks
 description: The catalog of blocks that ship with CyberEther.
-order: 41
+order: 44
 category: Usage
 ---
 
@@ -74,7 +74,9 @@ Sources and sinks: hardware, files, audio, and the network.
 | Audio | `audio` | Plays audio through a sound device. |
 | File Reader | `file_reader` | Reads raw binary signal data from a file. |
 | File Writer | `file_writer` | Writes raw binary signal data to a file. |
-| Soapy SDR | `soapy` | Receives samples from a SoapySDR radio. |
+| SDR | `sdr` | Receives samples from a USB radio. |
+| SDR Sweep | `sdr_sweep` | Sweeps a radio across a wide band. |
+| SoapySDR | `soapy` | Receives samples through an installed SoapySDR. |
 | WebSocket | `websocket` | Receives data streams over WebSocket. |
 
 ## Visualization
@@ -87,7 +89,6 @@ Blocks that render a surface into their node.
 | Frame | `frame` | Displays images and heat maps. |
 | Lineplot | `lineplot` | Displays data in a line plot visualization. |
 | Note | `note` | Displays formatted markdown text inside a node. |
-| Spectrogram | `spectrogram` | Displays a spectrogram of data. |
 | Spectrum Analyzer | `spectrum_analyzer` | Shows the spectrum of complex samples as a trace and a waterfall. |
 | Waterfall | `waterfall` | Shows frequency spectrum over time as a scrolling waterfall. |
 | 3D Waterfall | `waterfall_3d` | Displays spectrum history as a 3D surface. |
