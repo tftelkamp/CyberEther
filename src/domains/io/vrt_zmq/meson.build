@@ -4,4 +4,8 @@ if cfg_lst.get('JETSTREAM_LOADER_VRTZMQ_AVAILABLE', false)
         'module_impl.cc',
         'module_impl_native_cpu.cc',
     ])
+
+    module_test_lst += files([
+        'module_tests.cc',
+    ])
 endif

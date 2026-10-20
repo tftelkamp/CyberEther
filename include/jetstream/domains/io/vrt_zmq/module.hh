@@ -1,5 +1,5 @@
-#ifndef JETSTREAM_DOMAINS_IO_VRTZMQ_MODULE_HH
-#define JETSTREAM_DOMAINS_IO_VRTZMQ_MODULE_HH
+#ifndef JETSTREAM_DOMAINS_IO_VRT_ZMQ_MODULE_HH
+#define JETSTREAM_DOMAINS_IO_VRT_ZMQ_MODULE_HH
 
 #include "jetstream/memory/types.hh"
 #include "jetstream/module.hh"
@@ -16,17 +16,14 @@ struct VrtZmq : public Module::Config {
     U64 vrt_instance = 0;
     U64 vrt_channel = 0;
 
-    F32 vrt_frequency = 0;
-    U64 vrt_rate = 0;
-
     JST_MODULE_TYPE(vrtzmq);
     JST_MODULE_PARAMS(numberOfBatches,
                       numberOfTimeSamples,
                       bufferMultiplier,
-                      hostName, vrt_instance, vrt_channel, vrt_frequency, vrt_rate);
+                      hostName, vrt_instance, vrt_channel);
 };
 
 }  // namespace Jetstream::Modules
 
-#endif  // #define JETSTREAM_DOMAINS_IO_VRTZMQ_MODULE_HH
+#endif  // JETSTREAM_DOMAINS_IO_VRT_ZMQ_MODULE_HH
 

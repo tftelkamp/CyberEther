@@ -48,6 +48,9 @@ struct context_type {
     uint64_t fractional_seconds_timestamp;
     uint64_t integer_seconds_timestamp;
     uint32_t timestamp_calibration_time;
+    bool has_payload_format;
+    uint8_t data_item_size;
+    uint8_t item_packing_field_size;
 };
 
 struct packet_type {
@@ -81,10 +84,13 @@ void init_context(context_type* context) {
     context->reflock = false;
     context->time_cal = false;
     context->timestamp_calibration_time = 0;
+    context->has_payload_format = false;
+    context->data_item_size = 16;
+    context->item_packing_field_size = 32;
 }
 
 bool check_packet_count(int8_t counter, context_type* vrt_context) {
-    if ( (vrt_context->last_data_counter > 0) and
+    if ( (vrt_context->last_data_counter >= 0) and
             ( (counter != (vrt_context->last_data_counter+1)%16) and
               (counter != (vrt_context->last_data_counter  )%16) ) ) {
         printf("# Error: lost frame (expected %i, received %i)\n", vrt_context->last_data_counter, counter);
@@ -109,6 +115,8 @@ void vrt_print_context(context_type* vrt_context) {
     printf("#    RF frac. Freq [Hz]: %e\n", vrt_context->rf_frac_freq);
     printf("#    Bandwidth [Hz]: %i\n", vrt_context->bandwidth);
     printf("#    Gain [dB]: %i\n", vrt_context->gain);
+    if (vrt_context->has_payload_format)
+        printf("#    Sample size [bits per component]: %u\n", vrt_context->data_item_size);
     printf("#    Ref lock: %s\n", vrt_context->reflock == 1 ? "external" : "internal");
     printf("#    Time cal: %s\n", vrt_context->time_cal == 1? "pps" : "internal");
     if (vrt_context->timestamp_calibration_time != 0)
@@ -183,6 +191,12 @@ bool vrt_process(uint32_t* buffer, uint32_t size, context_type* vrt_context, pac
 
             if (c.has.timestamp_calibration_time)
                 vrt_context->timestamp_calibration_time = c.timestamp_calibration_time;
+
+            if (c.has.data_packet_payload_format) {
+                vrt_context->has_payload_format = true;
+                vrt_context->data_item_size = c.data_packet_payload_format.data_item_size + 1;
+                vrt_context->item_packing_field_size = c.data_packet_payload_format.item_packing_field_size + 1;
+            }
 
             vrt_context->context_changed = c.context_field_change_indicator;
             vrt_packet->context = true;
